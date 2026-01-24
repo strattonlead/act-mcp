@@ -1,0 +1,270 @@
+using ACT.Models;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace ACT.Services;
+
+public class ChatAgent : IChatAgent
+{
+    private readonly IChatClient _chatClient;
+    private readonly ILogger<ChatAgent> _logger;
+
+    public ChatAgent(IChatClient chatClient, ILogger<ChatAgent> logger)
+    {
+        _chatClient = chatClient;
+        _logger = logger;
+    }
+
+    public async Task<string> ExtractActEventsAsync(string conversationHistory, CancellationToken ct = default)
+    {
+        var messages = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.System, 
+                "You are an expert in Affect Control Theory (ACT). Your task is to analyze a conversation and extract 'ACT events'. " +
+                "An ACT event consists of an Actor, a Behavior, and an Object. " +
+                "The Actor and Object must be mapped to valid identities (e.g., 'student', 'teacher', 'doctor'). " +
+                "The Behavior must be mapped to a valid ACT behavior (e.g., 'advise', 'ask', 'greet'). " +
+                "For the provided conversation, extract a list of events in the format: Actor|Behavior|Object. " +
+                "Return ONLY the list of events, one per line. Do not include any other text."),
+            new ChatMessage(ChatRole.User, conversationHistory)
+        };
+
+        try
+        {
+            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            return response.Text ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to extract ACT events from LLM.");
+            throw;
+        }
+    }
+
+    public async Task<List<ParsedMessage>> ParseMessagesAsync(string rawInput, CancellationToken ct = default)
+    {
+        var systemPrompt = @"You are an expert at parsing conversation transcripts. 
+Your task is to identify individual messages from a raw conversation and determine who the speaker is.
+
+Rules:
+- Look for patterns like 'User:', 'Bot:', 'A:', 'B:', or similar speaker indicators
+- If no explicit labels exist, infer speakers from context (alternating pattern, etc.)
+- Preserve the order of messages
+- Handle various formats: chat logs, transcripts, dialogue scripts
+
+Return a JSON array with this exact format (no other text):
+[
+  {""speaker"": ""<speaker_label>"", ""content"": ""<message_text>"", ""order"": <0-indexed_position>}
+]
+
+Example input:
+User: Hello
+Bot: Hi there!
+
+Example output:
+[{""speaker"": ""User"", ""content"": ""Hello"", ""order"": 0}, {""speaker"": ""Bot"", ""content"": ""Hi there!"", ""order"": 1}]";
+
+        var messages = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.System, systemPrompt),
+            new ChatMessage(ChatRole.User, rawInput)
+        };
+
+        try
+        {
+            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            var jsonText = ExtractJson(response.Text ?? "[]");
+            
+            var parsed = JsonSerializer.Deserialize<List<ParsedMessage>>(jsonText, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            return parsed ?? new List<ParsedMessage>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to parse messages from LLM.");
+            throw;
+        }
+    }
+
+    public async Task<List<LabeledSpeaker>> LabelIdentitiesAsync(
+        List<ParsedMessage> messages, 
+        List<string> availableIdentities, 
+        CancellationToken ct = default)
+    {
+        // Get unique speakers
+        var uniqueSpeakers = messages.Select(m => m.Speaker).Distinct().ToList();
+        
+        // Provide a subset of identities for context (top 100)
+        var identitySample = availableIdentities.Take(100).ToList();
+        
+        var systemPrompt = $@"You are an expert in Affect Control Theory (ACT). 
+Your task is to map conversation participants to ACT identity terms from a cultural dictionary.
+
+Available identities include (sample): {string.Join(", ", identitySample)}
+(There are more identities available - choose the best match from common social roles)
+
+Common mappings:
+- 'Bot', 'Assistant', 'AI', 'System' → 'assistant' or similar helper role
+- 'User', 'Human', 'Customer' → 'student', 'client', 'customer' or similar
+- Named persons → infer from context
+
+Speaker labels to map: {string.Join(", ", uniqueSpeakers)}
+
+Return a JSON array with this exact format (no other text):
+[
+  {{""originalLabel"": ""<speaker_label>"", ""identity"": ""<act_identity>"", ""displayName"": ""<friendly_name>""}}
+]
+
+Choose identities that best represent the social role of each speaker in the conversation context.";
+
+        var userContent = $"Map these speakers based on this conversation:\n\n" +
+            string.Join("\n", messages.Select(m => $"{m.Speaker}: {m.Content}"));
+
+        var chatMessages = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.System, systemPrompt),
+            new ChatMessage(ChatRole.User, userContent)
+        };
+
+        try
+        {
+            var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+            var jsonText = ExtractJson(response.Text ?? "[]");
+            
+            var labeled = JsonSerializer.Deserialize<List<LabeledSpeaker>>(jsonText, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            return labeled ?? new List<LabeledSpeaker>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to label identities from LLM.");
+            throw;
+        }
+    }
+
+    public async Task<List<DetectedSituation>> DetectSituationsAsync(
+        List<ParsedMessage> messages, 
+        List<LabeledSpeaker> speakers,
+        List<string> availableBehaviors, 
+        CancellationToken ct = default)
+    {
+        // Build speaker mapping for context
+        var speakerMap = speakers.ToDictionary(s => s.OriginalLabel, s => s.Identity);
+        
+        // Provide behavior samples
+        var behaviorSample = availableBehaviors.Take(100).ToList();
+        
+        var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
+Your task is to analyze a conversation and:
+1. Divide it into logical situations (context shifts, topic changes)
+2. For each situation, extract ACT events (Actor performs Behavior towards Object)
+
+Speaker identity mapping:
+{string.Join("\n", speakers.Select(s => $"- {s.OriginalLabel} = {s.Identity}"))}
+
+Available behaviors include (sample): {string.Join(", ", behaviorSample)}
+(Choose behaviors that best describe the action - use common verbs if exact match not available)
+
+Return a JSON array with this exact format (no other text):
+[
+  {{
+    ""name"": ""Situation Name"",
+    ""description"": ""Brief description of context"",
+    ""events"": [
+      {{
+        ""actorSpeaker"": ""<original_speaker_label>"",
+        ""behavior"": ""<act_behavior_term>"",
+        ""objectSpeaker"": ""<original_speaker_label_of_recipient>"",
+        ""originalMessage"": ""<the_message_text>""
+      }}
+    ]
+  }}
+]
+
+Guidelines:
+- Each message typically generates one event
+- The speaker is the Actor, the other participant is the Object
+- Choose behaviors that capture the emotional/social meaning of the message
+- Group related exchanges into the same situation";
+
+        var conversationText = string.Join("\n", messages.Select(m => $"{m.Speaker}: {m.Content}"));
+
+        var chatMessages = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.System, systemPrompt),
+            new ChatMessage(ChatRole.User, $"Analyze this conversation:\n\n{conversationText}")
+        };
+
+        try
+        {
+            var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+            var jsonText = ExtractJson(response.Text ?? "[]");
+            
+            var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            return situations ?? new List<DetectedSituation>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to detect situations from LLM.");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Extract JSON from a response that might contain markdown code blocks or extra text.
+    /// </summary>
+    private string ExtractJson(string text)
+    {
+        // Try to find JSON array in the text
+        var trimmed = text.Trim();
+        
+        // Handle markdown code blocks
+        if (trimmed.Contains("```json"))
+        {
+            var start = trimmed.IndexOf("```json") + 7;
+            var end = trimmed.IndexOf("```", start);
+            if (end > start)
+            {
+                trimmed = trimmed.Substring(start, end - start).Trim();
+            }
+        }
+        else if (trimmed.Contains("```"))
+        {
+            var start = trimmed.IndexOf("```") + 3;
+            var end = trimmed.IndexOf("```", start);
+            if (end > start)
+            {
+                trimmed = trimmed.Substring(start, end - start).Trim();
+            }
+        }
+        
+        // Find the JSON array
+        var jsonStart = trimmed.IndexOf('[');
+        var jsonEnd = trimmed.LastIndexOf(']');
+        
+        if (jsonStart >= 0 && jsonEnd > jsonStart)
+        {
+            return trimmed.Substring(jsonStart, jsonEnd - jsonStart + 1);
+        }
+        
+        return trimmed;
+    }
+}

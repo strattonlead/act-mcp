@@ -1,0 +1,188 @@
+@page "/dictionaries"
+@using ACT.Services
+@inject IActService ActService
+
+<MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
+    <MudText Typo="Typo.h3" GutterBottom="true">ACT Dictionaries</MudText>
+    <MudText Typo="Typo.body1" Class="mb-4">Select a dictionary to explore its details.</MudText>
+
+    @if (_loading)
+    {
+        <MudProgressCircular Color="Color.Primary" Indeterminate="true" />
+    }
+    else if (_dictionaries == null || !_dictionaries.Any())
+    {
+        <MudAlert Severity="Severity.Info">No dictionaries found.</MudAlert>
+    }
+    else
+    {
+        <MudGrid>
+            <MudItem xs="12" md="4">
+                <MudPaper Elevation="2" Class="pa-4" Style="height: 70vh; overflow-y: auto;">
+                    <div class="d-flex flex-column gap-2">
+			            <MudTextField @bind-Value="_searchString" Placeholder="Search dictionaries..." Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-3" />
+                        @foreach (var dict in _dictionaries.Where(d => string.IsNullOrWhiteSpace(_searchString) || d.Key.Contains(_searchString, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            <MudPaper Class="@($"pa-3 cursor-pointer {( _selectedDictionary == dict ? "mud-theme-primary" : "")}")" 
+                                      @onclick="@(() => SelectDictionary(dict))" Elevation="1">
+                                <MudText Typo="Typo.body1">@dict.Key</MudText>
+                                <MudText Typo="Typo.caption" Color="Color.Inherit">@dict.Year</MudText>
+                            </MudPaper>
+                        }
+                    </div>
+                </MudPaper>
+            </MudItem>
+            <MudItem xs="12" md="8">
+                <MudPaper Elevation="2" Class="pa-4" Style="height: 70vh; overflow-y: auto;">
+                    @if (_selectedDictionary == null)
+                    {
+                        <div class="d-flex justify-center align-center" style="height: 100%;">
+                            <MudText Typo="Typo.h6" Color="Color.Secondary">Please select a dictionary from the list.</MudText>
+                        </div>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.h4" GutterBottom="true">@_selectedDictionary.Key</MudText>
+                        <MudText Typo="Typo.subtitle1" GutterBottom="true">@_selectedDictionary.Description</MudText>
+                        <MudDivider Class="my-4" />
+
+                        <MudTabs Elevation="2" Rounded="true" ApplyEffectsToContainer="true" PanelClass="pa-6">
+                            <MudTabPanel Text="General">
+                                <MudGrid>
+                                    <MudItem xs="12" sm="6">
+                                        <MudText Typo="Typo.body2" Color="Color.Secondary">Context</MudText>
+                                        <MudText Typo="Typo.body1" GutterBottom="true">@_selectedDictionary.Context</MudText>
+                                    </MudItem>
+                                    <MudItem xs="12" sm="6">
+                                        <MudText Typo="Typo.body2" Color="Color.Secondary">Year</MudText>
+                                        <MudText Typo="Typo.body1" GutterBottom="true">@_selectedDictionary.Year</MudText>
+                                    </MudItem>
+                                    <MudItem xs="12" sm="6">
+                                        <MudText Typo="Typo.body2" Color="Color.Secondary">Individual</MudText>
+                                        <MudText Typo="Typo.body1" GutterBottom="true">@(_selectedDictionary.Individual ? "Yes" : "No")</MudText>
+                                    </MudItem>
+                                     <MudItem xs="12">
+                                        <MudText Typo="Typo.body2" Color="Color.Secondary">Source</MudText>
+                                        <MudText Typo="Typo.body1" GutterBottom="true">@_selectedDictionary.Source</MudText>
+                                    </MudItem>
+                                    <MudItem xs="12">
+                                        <MudText Typo="Typo.body2" Color="Color.Secondary">Citation</MudText>
+                                        <MudText Typo="Typo.body1" Class="font-italic" GutterBottom="true">@_selectedDictionary.Citation</MudText>
+                                    </MudItem>
+                                </MudGrid>
+
+                                <MudDivider Class="my-4" />
+
+                                <MudText Typo="Typo.h6" GutterBottom="true">Components</MudText>
+                                <div class="d-flex flex-wrap gap-2 mb-4">
+                                    @foreach (var comp in _selectedDictionary.ComponentsList)
+                                    {
+                                        <MudChip T="string" Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small">@comp</MudChip>
+                                    }
+                                </div>
+
+                                <MudText Typo="Typo.h6" GutterBottom="true">Stats</MudText>
+                                <div class="d-flex flex-wrap gap-2 mb-4">
+                                    @foreach (var stat in _selectedDictionary.StatsList)
+                                    {
+                                        <MudChip T="string" Color="Color.Secondary" Variant="Variant.Outlined" Size="Size.Small">@stat</MudChip>
+                                    }
+                                </div>
+
+                                <MudText Typo="Typo.h6" GutterBottom="true">Groups</MudText>
+                                <div class="d-flex flex-wrap gap-2 mb-4">
+                                    @foreach (var group in _selectedDictionary.GroupsList)
+                                    {
+                                        <MudChip T="string" Color="Color.Info" Variant="Variant.Outlined" Size="Size.Small">@group</MudChip>
+                                    }
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(_selectedDictionary.Notes))
+                                {
+                                    <MudDivider Class="my-4" />
+                                    <MudText Typo="Typo.h6" GutterBottom="true">Notes</MudText>
+                                    <MudText Typo="Typo.body2">@_selectedDictionary.Notes</MudText>
+                                }
+                            </MudTabPanel>
+                            <MudTabPanel Text="Identities" OnClick="@LoadIdentities">
+                                @if (_identitiesLoading)
+                                {
+                                    <MudProgressCircular Color="Color.Primary" Indeterminate="true" />
+                                }
+                                else if (_identities == null)
+                                {
+                                    <MudText>Select a dictionary to view identities.</MudText>
+                                }
+                                else if (!_identities.Any())
+                                {
+                                    <MudText>No identities found.</MudText>
+                                }
+                                else
+                                {
+                                    <MudList T="string" Dense="true" Style="max-height: 400px; overflow-y: auto;">
+                                        @foreach (var identity in _identities)
+                                        {
+                                            <MudListItem>
+                                                <MudText Typo="Typo.body2">@identity</MudText>
+                                            </MudListItem>
+                                        }
+                                    </MudList>
+                                }
+                            </MudTabPanel>
+                        </MudTabs>
+                    }
+                </MudPaper>
+            </MudItem>
+        </MudGrid>
+    }
+</MudContainer>
+
+@code {
+    private List<ActDictionaryDto> _dictionaries = new();
+    private ActDictionaryDto? _selectedDictionary;
+    private string _searchString = string.Empty;
+    private bool _loading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _dictionaries = await ActService.GetDictionariesAsync();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private List<string> _identities;
+    private bool _identitiesLoading;
+
+    private async Task SelectDictionary(ActDictionaryDto dict)
+    {
+        Console.WriteLine($"Selected dictionary: {dict.Key}");
+        _selectedDictionary = dict;
+        _identities = null; // Reset identities
+        StateHasChanged();
+        
+        // Removed eager loading to follow user request "when this tab is clicked"
+        // But if tab is already active, we should load it? 
+        // For simplicity, let's load it on tab click.
+    }
+
+    private async Task LoadIdentities()
+    {
+        if (_selectedDictionary != null && _identities == null)
+        {
+            _identitiesLoading = true;
+            try
+            {
+                _identities = await ActService.GetDictionaryIdentitiesAsync(_selectedDictionary.Key);
+            }
+            finally
+            {
+                _identitiesLoading = false;
+            }
+        }
+    }
+}

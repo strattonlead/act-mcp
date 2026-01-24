@@ -1,0 +1,87 @@
+@page "/mcp-usage"
+@using ACT.Services
+@inject IActToolMonitor Monitor
+@implements IDisposable
+
+<MudText Typo="Typo.h4" Class="mb-4">MCP Tool Usage</MudText>
+
+<MudTable Items="_logs" Hover="true" Breakpoint="Breakpoint.Sm" LoadingProgressColor="Color.Info" Dense="true">
+    <HeaderContent>
+        <MudTh>Time</MudTh>
+        <MudTh>Tool</MudTh>
+        <MudTh>Success</MudTh>
+        <MudTh>Arguments</MudTh>
+        <MudTh>Result/Error</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Time">@context.Timestamp.ToString("HH:mm:ss")</MudTd>
+        <MudTd DataLabel="Tool">@context.ToolName</MudTd>
+        <MudTd DataLabel="Success">
+            @if (context.IsSuccess)
+            {
+                <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Color="Color.Success" />
+            }
+            else
+            {
+                <MudIcon Icon="@Icons.Material.Filled.Error" Color="Color.Error" />
+            }
+        </MudTd>
+        <MudTd DataLabel="Arguments">
+            <MudHighlighter Text="@context.Arguments" />
+            @if(context.Arguments.Length > 100)
+            {
+                 <MudButton Variant="Variant.Text" Color="Color.Primary" OnClick="@(() => ShowDetails(context.Arguments, "Arguments"))">View Full</MudButton>
+            }
+        </MudTd>
+        <MudTd DataLabel="Result">
+            @if (!string.IsNullOrEmpty(context.ErrorMessage))
+            {
+                 <MudText Color="Color.Error">@context.ErrorMessage</MudText>
+            }
+            else
+            {
+                 <MudText>@(context.Result.Length > 100 ? context.Result.Substring(0, 100) + "..." : context.Result)</MudText>
+                 @if(context.Result.Length > 100)
+                 {
+                      <MudButton Variant="Variant.Text" Color="Color.Primary" OnClick="@(() => ShowDetails(context.Result, "Result"))">View Full</MudButton>
+                 }
+            }
+        </MudTd>
+    </RowTemplate>
+    <PagerContent>
+        <MudTablePager />
+    </PagerContent>
+</MudTable>
+
+@code {
+    private IEnumerable<ToolExecutionLog> _logs = new List<ToolExecutionLog>();
+
+    protected override void OnInitialized()
+    {
+        Monitor.OnExecution += UpdateLogs;
+        UpdateLogs();
+    }
+
+    private void UpdateLogs()
+    {
+        _logs = Monitor.GetRecentLogs();
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Monitor.OnExecution -= UpdateLogs;
+    }
+
+    [Inject] private IDialogService DialogService { get; set; }
+
+    private void ShowDetails(string content, string title)
+    {
+        var parameters = new DialogParameters();
+        parameters.Add("Content", content);
+
+        var options = new DialogOptions { CloseButton = true, MaxWidth = MaxWidth.Medium, FullWidth = true };
+
+        DialogService.Show<DialogDetails>(title, parameters, options);
+    }
+}

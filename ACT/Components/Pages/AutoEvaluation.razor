@@ -1,0 +1,592 @@
+@page "/auto-evaluation"
+@using ACT.Models
+@using ACT.Services
+@using System.Threading
+@inject IChatAgent ChatAgent
+@inject IActService ActService
+@inject IActProcessingService ActProcessingService
+@inject ISnackbar Snackbar
+
+<MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
+    <MudText Typo="Typo.h4" GutterBottom="true">Auto Evaluation</MudText>
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+        Paste a conversation and let AI automatically analyze it for Affect Control Theory evaluation.
+    </MudText>
+
+    <MudStepper @bind-ActiveIndex="_currentStep" Linear="true" Color="Color.Primary">
+        <!-- Step 1: Input Conversation -->
+        <MudStep Title="Paste Conversation">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Step 1: Input Conversation</MudText>
+                <MudTextField @bind-Value="_state.RawInput" 
+                              Label="Paste your conversation here" 
+                              Variant="Variant.Outlined" 
+                              Lines="10"
+                              Placeholder="User: Hello&#10;Bot: Hi there!&#10;User: Can you help me?&#10;Bot: Of course!" />
+                
+                <div class="d-flex justify-end mt-4">
+                    <MudButton Variant="Variant.Filled" 
+                               Color="Color.Primary" 
+                               OnClick="ParseMessages" 
+                               Disabled="@(string.IsNullOrWhiteSpace(_state.RawInput) || _isProcessing)">
+                        @if (_isProcessing)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        }
+                        Parse Messages
+                    </MudButton>
+                </div>
+            </MudPaper>
+        </MudStep>
+
+        <!-- Step 2: Review Parsed Messages -->
+        <MudStep Title="Parsed Messages">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Step 2: Review Parsed Messages</MudText>
+                
+                @if (_state.ParsedMessages.Any())
+                {
+                    <div class="d-flex justify-end mb-2">
+                        <MudSwitch @bind-Value="_isEditingMessages" Color="Color.Primary" Label="Edit Mode" />
+                    </div>
+
+                    <MudTable Items="@_state.ParsedMessages" Dense="true" Hover="true" Striped="true">
+                        <HeaderContent>
+                            <MudTh>#</MudTh>
+                            <MudTh>Speaker</MudTh>
+                            <MudTh>Message</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd DataLabel="#">@(context.Order + 1)</MudTd>
+                            <MudTd DataLabel="Speaker">
+                                @if (_isEditingMessages)
+                                {
+                                    <MudTextField @bind-Value="context.Speaker" Margin="Margin.Dense" />
+                                }
+                                else
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="@GetSpeakerColor(context.Speaker)">@context.Speaker</MudChip>
+                                }
+                            </MudTd>
+                            <MudTd DataLabel="Message">
+                                @if (_isEditingMessages)
+                                {
+                                    <MudTextField @bind-Value="context.Content" Margin="Margin.Dense" />
+                                }
+                                else
+                                {
+                                    @context.Content
+                                }
+                            </MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                }
+                else
+                {
+                    <MudAlert Severity="Severity.Info">No messages parsed yet. Go back to Step 1.</MudAlert>
+                }
+
+                <div class="d-flex justify-space-between mt-4">
+                    <MudButton Variant="Variant.Outlined" OnClick="@(() => _currentStep--)">Back</MudButton>
+                    <MudButton Variant="Variant.Filled" 
+                               Color="Color.Primary" 
+                               OnClick="@(() => _currentStep++)"
+                               Disabled="@(!_state.ParsedMessages.Any())">
+                        Continue
+                    </MudButton>
+                </div>
+            </MudPaper>
+        </MudStep>
+
+        <!-- Step 3: Select Dictionary -->
+        <MudStep Title="Select Dictionary">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Step 3: Select ACT Dictionary</MudText>
+                
+                <MudSelect T="string" 
+                           Label="Dictionary" 
+                           @bind-Value="_state.DictionaryKey" 
+                           Variant="Variant.Outlined" 
+                           AnchorOrigin="Origin.BottomCenter"
+                           Class="mb-4">
+                    @foreach (var dict in _dictionaries)
+                    {
+                        <MudSelectItem Value="@dict.Key">@dict.Key</MudSelectItem>
+                    }
+                </MudSelect>
+
+                <div class="d-flex justify-space-between mt-4">
+                    <MudButton Variant="Variant.Outlined" OnClick="@(() => _currentStep--)">Back</MudButton>
+                    <MudButton Variant="Variant.Filled" 
+                               Color="Color.Primary" 
+                               OnClick="LabelIdentities"
+                               Disabled="@(string.IsNullOrEmpty(_state.DictionaryKey) || _isProcessing)">
+                        @if (_isProcessing)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        }
+                        Label Identities
+                    </MudButton>
+                </div>
+            </MudPaper>
+        </MudStep>
+
+        <!-- Step 4: Review Labeled Speakers -->
+        <MudStep Title="Labeled Identities">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Step 4: Review Labeled Identities</MudText>
+                
+                @if (_state.LabeledSpeakers.Any())
+                {
+                    <MudTable Items="@_state.LabeledSpeakers" Dense="true" Hover="true">
+                        <HeaderContent>
+                            <MudTh>Original Label</MudTh>
+                            <MudTh>Display Name</MudTh>
+                            <MudTh>ACT Identity</MudTh>
+                            <MudTh>Actions</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd DataLabel="Original">
+                                <MudChip T="string" Size="Size.Small" Color="@GetSpeakerColor(context.OriginalLabel)">@context.OriginalLabel</MudChip>
+                            </MudTd>
+                            <MudTd DataLabel="Name">@context.DisplayName</MudTd>
+                            <MudTd DataLabel="Identity">
+                                <MudChip T="string" Size="Size.Small" Color="Color.Info">@context.Identity</MudChip>
+                            </MudTd>
+                            <MudTd DataLabel="Actions">
+                                <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" OnClick="@(() => OpenEditIdentityDialog(context))" />
+                            </MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                }
+                else
+                {
+                    <MudAlert Severity="Severity.Info">No speakers labeled yet.</MudAlert>
+                }
+
+                <MudDialog @bind-IsVisible="_isIdentityDialogOpen">
+                    <TitleContent>
+                        <MudText Typo="Typo.h6">
+                            Edit Identity for "@_editingSpeaker?.OriginalLabel"
+                        </MudText>
+                    </TitleContent>
+                    <DialogContent>
+                        @if (_editingSpeaker != null)
+                        {
+                            <MudTextField @bind-Value="_editingSpeaker.DisplayName" Label="Display Name" Class="mb-3" />
+                            <MudAutocomplete T="string" Label="ACT Identity" @bind-Value="_editingSpeaker.Identity" SearchFunc="@SearchIdentities" CoerceText="true" ResetValueOnEmptyText="true" Class="mb-3" />
+                            <MudCheckBox @bind-Value="_applyToAllSimilar" Label="@($"Apply to all speakers labeled '{_editingSpeaker.OriginalLabel}'")" Color="Color.Primary" />
+                        }
+                    </DialogContent>
+                    <DialogActions>
+                        <MudButton OnClick="CloseIdentityDialog">Cancel</MudButton>
+                        <MudButton Color="Color.Primary" OnClick="SaveIdentity">Save</MudButton>
+                    </DialogActions>
+                </MudDialog>
+
+                <div class="d-flex justify-space-between mt-4">
+                    <MudButton Variant="Variant.Outlined" OnClick="@(() => _currentStep--)">Back</MudButton>
+                    <MudButton Variant="Variant.Filled" 
+                               Color="Color.Primary" 
+                               OnClick="DetectSituations"
+                               Disabled="@(!_state.LabeledSpeakers.Any() || _isProcessing)">
+                        @if (_isProcessing)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        }
+                        Detect Situations
+                    </MudButton>
+                </div>
+            </MudPaper>
+        </MudStep>
+
+        <!-- Step 5: Situations & Events with EPA -->
+        <MudStep Title="Situations & EPA">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Step 5: Situations & Events</MudText>
+                
+                @if (_state.DetectedSituations.Any())
+                {
+                    <MudExpansionPanels MultiExpansion="true">
+                        @foreach (var situation in _state.DetectedSituations)
+                        {
+                            <MudExpansionPanel Text="@situation.Name" IsInitiallyExpanded="true">
+                                <TitleContent>
+                                    <div class="d-flex align-center gap-4">
+                                        <MudText><b>@situation.Name</b></MudText>
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Info">@situation.Events.Count Events</MudChip>
+                                    </div>
+                                </TitleContent>
+                                <ChildContent>
+                                    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">@situation.Description</MudText>
+                                    
+                                    <div class="d-flex flex-column gap-2">
+                                        @foreach (var evt in situation.Events)
+                                        {
+                                            var interaction = GetInteractionForEvent(evt);
+                                            <MudCard Elevation="1" Class="pa-3">
+                                                <div class="d-flex align-center gap-2 flex-wrap">
+                                                    @if (_isEditingSituations)
+                                                    {
+                                                        <MudSelect T="string" @bind-Value="evt.ActorSpeaker" Label="Actor" Margin="Margin.Dense" Dense="true" Style="min-width: 120px;">
+                                                            @foreach (var s in _state.LabeledSpeakers)
+                                                            {
+                                                                <MudSelectItem Value="@s.OriginalLabel">@s.DisplayName</MudSelectItem>
+                                                            }
+                                                        </MudSelect>
+                                                        
+                                                        <MudAutocomplete T="string" @bind-Value="evt.Behavior" Label="Behavior" SearchFunc="@SearchBehaviors" CoerceText="true" ResetValueOnEmptyText="true" Margin="Margin.Dense" Dense="true" Style="min-width: 150px;" />
+
+                                                        <MudSelect T="string" @bind-Value="evt.ObjectSpeaker" Label="Object" Margin="Margin.Dense" Dense="true" Style="min-width: 120px;">
+                                                            @foreach (var s in _state.LabeledSpeakers)
+                                                            {
+                                                                <MudSelectItem Value="@s.OriginalLabel">@s.DisplayName</MudSelectItem>
+                                                            }
+                                                        </MudSelect>
+                                                    }
+                                                    else
+                                                    {
+                                                        <MudChip T="string" Size="Size.Small" Color="Color.Primary">@evt.ActorSpeaker</MudChip>
+                                                        <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                                        <MudText Class="font-italic">@evt.Behavior</MudText>
+                                                        <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                                        <MudChip T="string" Size="Size.Small" Color="Color.Secondary">@evt.ObjectSpeaker</MudChip>
+                                                    }
+                                                </div>
+                                                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-1">"@evt.OriginalMessage"</MudText>
+                                                
+                                                @if (interaction?.Result != null)
+                                                {
+                                                    <MudDivider Class="my-2" />
+                                                    <div class="d-flex gap-4 flex-wrap align-center">
+                                                        <MudText Typo="Typo.caption">
+                                                            <b>Deflection:</b> @interaction.Result.Deflection.ToString("F2")
+                                                        </MudText>
+                                                        <MudText Typo="Typo.caption">
+                                                            <b>Actor EPA:</b> [@FormatEPA(interaction.Result.TransientActorEPA)]
+                                                        </MudText>
+                                                        <MudText Typo="Typo.caption">
+                                                            <b>Behavior EPA:</b> [@FormatEPA(interaction.Result.TransientBehaviorEPA)]
+                                                        </MudText>
+                                                        <MudText Typo="Typo.caption">
+                                                            <b>Object EPA:</b> [@FormatEPA(interaction.Result.TransientObjectEPA)]
+                                                        </MudText>
+                                                    </div>
+                                                }
+                                                else if (_calculatedEvents.ContainsKey(evt) && _calculatedEvents[evt] == null)
+                                                {
+                                                    <MudText Typo="Typo.caption" Color="Color.Warning" Class="mt-1">
+                                                        <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small" /> Calculation failed - behavior may not exist in dictionary
+                                                    </MudText>
+                                                }
+                                            </MudCard>
+                                        }
+                                    </div>
+                                </ChildContent>
+                            </MudExpansionPanel>
+                        }
+                    </MudExpansionPanels>
+
+                    <div class="d-flex justify-space-between mt-4">
+                        <MudButton Variant="Variant.Outlined" OnClick="@(() => _currentStep--)">Back</MudButton>
+                        <MudStack Row="true">
+                            <MudSwitch @bind-Value="_isEditingSituations" Color="Color.Primary" Label="Edit Mode" />
+                            <MudButton Variant="Variant.Filled" 
+                                       Color="Color.Secondary" 
+                                       OnClick="CalculateAllEPA"
+                                       Disabled="@(_isProcessing)">
+                                @if (_isProcessing)
+                                {
+                                    <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                                }
+                                Recalculate EPA
+                            </MudButton>
+                            <MudButton Variant="Variant.Filled" Color="Color.Success" StartIcon="@Icons.Material.Filled.Download" OnClick="ExportJson">Export JSON</MudButton>
+                        </MudStack>
+                    </div>
+                }
+                else
+                {
+                    <MudAlert Severity="Severity.Info">No situations detected yet.</MudAlert>
+                    <div class="d-flex justify-start mt-4">
+                        <MudButton Variant="Variant.Outlined" OnClick="@(() => _currentStep--)">Back</MudButton>
+                    </div>
+                }
+            </MudPaper>
+        </MudStep>
+    </MudStepper>
+</MudContainer>
+
+@code {
+    private AutoEvaluationState _state = new();
+    private List<ActDictionaryDto> _dictionaries = new();
+    private List<string> _identities = new();
+    private List<string> _behaviors = new();
+    private int _currentStep = 0;
+    private bool _isProcessing = false;
+    private bool _isEditingMessages = false;
+    
+    // Store calculated interactions for display
+    private Dictionary<DetectedEvent, Interaction?> _calculatedEvents = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _dictionaries = await ActService.GetDictionariesAsync();
+    }
+
+    private async Task ParseMessages()
+    {
+        if (string.IsNullOrWhiteSpace(_state.RawInput)) return;
+        
+        _isProcessing = true;
+        StateHasChanged();
+        
+        try
+        {
+            _state.ParsedMessages = await ChatAgent.ParseMessagesAsync(_state.RawInput);
+            
+            if (_state.ParsedMessages.Any())
+            {
+                _currentStep++;
+                Snackbar.Add($"Parsed {_state.ParsedMessages.Count} messages successfully!", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add("Could not parse any messages. Please check the format.", Severity.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to parse messages: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isProcessing = false;
+        }
+    }
+
+    private async Task LabelIdentities()
+    {
+        if (string.IsNullOrEmpty(_state.DictionaryKey)) return;
+        
+        _isProcessing = true;
+        StateHasChanged();
+        
+        try
+        {
+            // Load dictionary data
+            _identities = await ActService.GetDictionaryIdentitiesAsync(_state.DictionaryKey);
+            _behaviors = await ActService.GetDictionaryBehaviorsAsync(_state.DictionaryKey);
+            
+            // Label identities
+            _state.LabeledSpeakers = await ChatAgent.LabelIdentitiesAsync(_state.ParsedMessages, _identities);
+            
+            if (_state.LabeledSpeakers.Any())
+            {
+                _currentStep++;
+                Snackbar.Add("Identities labeled successfully!", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add("Could not label identities.", Severity.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to label identities: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isProcessing = false;
+        }
+    }
+
+    private async Task DetectSituations()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+        
+        try
+        {
+            _state.DetectedSituations = await ChatAgent.DetectSituationsAsync(
+                _state.ParsedMessages, 
+                _state.LabeledSpeakers, 
+                _behaviors);
+            
+            if (_state.DetectedSituations.Any())
+            {
+                _currentStep++;
+                Snackbar.Add($"Detected {_state.DetectedSituations.Count} situations!", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add("Could not detect situations.", Severity.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to detect situations: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isProcessing = false;
+        }
+    }
+
+    private async Task CalculateAllEPA()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+        
+        var speakerMap = _state.LabeledSpeakers.ToDictionary(s => s.OriginalLabel, s => s);
+        int successCount = 0;
+        int failCount = 0;
+        
+        foreach (var situation in _state.DetectedSituations)
+        {
+            foreach (var evt in situation.Events)
+            {
+                try
+                {
+                    var actorSpeaker = speakerMap.GetValueOrDefault(evt.ActorSpeaker);
+                    var objectSpeaker = speakerMap.GetValueOrDefault(evt.ObjectSpeaker);
+                    
+                    if (actorSpeaker == null || objectSpeaker == null)
+                    {
+                        _calculatedEvents[evt] = null;
+                        failCount++;
+                        continue;
+                    }
+                    
+                    var interaction = new Interaction
+                    {
+                        Actor = new Person 
+                        { 
+                            Name = actorSpeaker.DisplayName, 
+                            Identity = actorSpeaker.Identity,
+                            Gender = "avg"
+                        },
+                        Object = new Person 
+                        { 
+                            Name = objectSpeaker.DisplayName, 
+                            Identity = objectSpeaker.Identity,
+                            Gender = "avg"
+                        },
+                        Behavior = evt.Behavior
+                    };
+                    
+                    var result = await ActProcessingService.CalculateInteractionAsync(interaction);
+                    interaction.Result = result;
+                    _calculatedEvents[evt] = interaction;
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    _calculatedEvents[evt] = null;
+                    failCount++;
+                    Console.WriteLine($"Failed to calculate EPA for event: {ex.Message}");
+                }
+                
+                StateHasChanged();
+            }
+        }
+        
+        _isProcessing = false;
+        
+        if (successCount > 0)
+        {
+            Snackbar.Add($"Calculated EPA for {successCount} events. {failCount} failed.", 
+                failCount > 0 ? Severity.Warning : Severity.Success);
+        }
+        else
+        {
+            Snackbar.Add("Failed to calculate EPA for any events.", Severity.Error);
+        }
+    }
+
+    private Interaction? GetInteractionForEvent(DetectedEvent evt)
+    {
+        return _calculatedEvents.GetValueOrDefault(evt);
+    }
+
+    private Color GetSpeakerColor(string speaker)
+    {
+        var lower = speaker.ToLowerInvariant();
+        if (lower.Contains("user") || lower.Contains("human") || lower.Contains("student"))
+            return Color.Primary;
+        if (lower.Contains("bot") || lower.Contains("assistant") || lower.Contains("ai"))
+            return Color.Secondary;
+        return Color.Default;
+    }
+
+    private string FormatEPA(double[]? epa)
+    {
+        if (epa == null || epa.Length < 3) return "N/A";
+        return $"E={epa[0]:F2}, P={epa[1]:F2}, A={epa[2]:F2}";
+    }
+
+    // Identity Editing
+    private bool _isIdentityDialogOpen;
+    private LabeledSpeaker? _editingSpeaker;
+    private bool _applyToAllSimilar;
+
+    private void OpenEditIdentityDialog(LabeledSpeaker speaker)
+    {
+        _editingSpeaker = speaker;
+        _applyToAllSimilar = false;
+        _isIdentityDialogOpen = true;
+    }
+
+    private void CloseIdentityDialog()
+    {
+        _isIdentityDialogOpen = false;
+        _editingSpeaker = null;
+    }
+
+    private void SaveIdentity()
+    {
+        if (_editingSpeaker != null && _applyToAllSimilar)
+        {
+            var similar = _state.LabeledSpeakers.Where(s => s.OriginalLabel == _editingSpeaker.OriginalLabel).ToList();
+            foreach (var s in similar)
+            {
+                s.DisplayName = _editingSpeaker.DisplayName;
+                s.Identity = _editingSpeaker.Identity;
+            }
+            Snackbar.Add($"Updated {similar.Count} identities.", Severity.Success);
+        }
+        else
+        {
+            Snackbar.Add("Identity updated.", Severity.Success);
+        }
+        
+        CloseIdentityDialog();
+    }
+
+    private Task<IEnumerable<string>> SearchIdentities(string value, CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(value))
+            return Task.FromResult<IEnumerable<string>>(_identities);
+        return Task.FromResult(_identities.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)));
+    }
+
+    // Situation Editing & Export
+    private bool _isEditingSituations;
+    [Inject] IJSRuntime JS { get; set; }
+
+    private Task<IEnumerable<string>> SearchBehaviors(string value, CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(value))
+            return Task.FromResult<IEnumerable<string>>(_behaviors);
+        return Task.FromResult(_behaviors.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)));
+    }
+
+    private async Task ExportJson()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(_state, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        using var stream = new System.IO.MemoryStream(bytes);
+        using var streamRef = new DotNetStreamReference(stream);
+        await JS.InvokeVoidAsync("window.downloadFileFromStream", $"auto-evaluation-{DateTime.Now:yyyyMMdd-HHmmss}.json", streamRef);
+    }
+}

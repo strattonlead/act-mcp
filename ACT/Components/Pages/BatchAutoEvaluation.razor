@@ -1,0 +1,233 @@
+@page "/batch-evaluation"
+@using ACT.Models
+@using ACT.Services
+@using System.IO
+@inject IBatchEvaluationService BatchService
+@inject IActService ActService
+@inject NavigationManager NavManager
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
+    <MudText Typo="Typo.h4" GutterBottom="true">Batch Auto Evaluation</MudText>
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+        Upload multiple files (txt, pdf, docx) to automatically evaluate them using Affect Control Theory.
+    </MudText>
+
+    <MudGrid>
+        <!-- Left Column: Controls & File List -->
+        <MudItem xs="12" md="4">
+            <MudPaper Class="pa-4 mb-4">
+                <MudText Typo="Typo.h6" Class="mb-3">1. Configuration</MudText>
+                
+                <MudSelect T="string" Label="Dictionary" @bind-Value="_dictionaryKey" Variant="Variant.Outlined" Class="mb-4">
+                    @foreach (var dict in _dictionaries)
+                    {
+                        <MudSelectItem Value="@dict.Key">@dict.Key</MudSelectItem>
+                    }
+                </MudSelect>
+
+                <MudFileUpload T="IReadOnlyList<IBrowserFile>" FilesChanged="UploadFiles" MaximumFileCount="10">
+                    <ActivatorContent>
+                        <MudButton Variant="Variant.Filled" 
+                                   Color="Color.Primary" 
+                                   StartIcon="@Icons.Material.Filled.CloudUpload">
+                            Select Files
+                        </MudButton>
+                    </ActivatorContent>
+                </MudFileUpload>
+                
+                <MudButton OnClick="StartProcessing" 
+                           Variant="Variant.Filled" 
+                           Color="Color.Secondary" 
+                           Class="mt-4" 
+                           Disabled="@(!_canStart)"
+                           FullWidth="true">
+                    Start Processing
+                </MudButton>
+            </MudPaper>
+
+            <MudPaper Class="pa-0" Style="max-height: 600px; overflow-y: auto;">
+                <MudList T="BatchFileStatus" Clickable="true" @bind-SelectedValue="_selectedFile">
+                    <MudListSubheader>Files (@_files.Count)</MudListSubheader>
+                    @foreach (var file in _files)
+                    {
+                        <MudListItem Value="@file" OnClick="@(() => SelectFile(file))">
+                            <div class="d-flex flex-column w-100">
+                                <div class="d-flex justify-space-between align-center">
+                                    <MudText Typo="Typo.body1">@file.FileName</MudText>
+                                    @if(file.State == BatchFileState.Completed)
+                                    {
+                                        <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Color="Color.Success" Size="Size.Small"/>
+                                    }
+                                    else if(file.State == BatchFileState.Failed)
+                                    {
+                                        <MudIcon Icon="@Icons.Material.Filled.Error" Color="Color.Error" Size="Size.Small"/>
+                                    }
+                                </div>
+                                <MudText Typo="Typo.caption" Color="Color.Secondary">@file.StatusMessage</MudText>
+                                <MudProgressLinear Color="@GetProgressColor(file.State)" Value="@file.Progress" Class="mt-1" />
+                            </div>
+                        </MudListItem>
+                        <MudDivider />
+                    }
+                </MudList>
+            </MudPaper>
+        </MudItem>
+
+        <!-- Right Column: Detail View -->
+        <MudItem xs="12" md="8">
+            <MudPaper Class="pa-4" Height="100%" MinHeight="500px">
+                @if (_selectedFile != null)
+                {
+                    <div class="d-flex justify-space-between align-center mb-4">
+                        <MudText Typo="Typo.h5">@_selectedFile.FileName</MudText>
+                        
+                        @if (_selectedFile.ConversationId.HasValue)
+                        {
+                            <MudButton Variant="Variant.Outlined" 
+                                       Color="Color.Primary" 
+                                       StartIcon="@Icons.Material.Filled.OpenInNew"
+                                       Href="@($"/conversation/{_selectedFile.ConversationId}")"
+                                       Target="_blank">
+                                Open Full Conversation
+                            </MudButton>
+                        }
+                    </div>
+
+                    <MudGrid>
+                        <MudItem xs="12">
+                            <MudAlert Severity="@GetSeverity(_selectedFile.State)">
+                                Status: <b>@_selectedFile.State</b> - @_selectedFile.StatusMessage
+                            </MudAlert>
+                        </MudItem>
+                        
+                        @if (!string.IsNullOrEmpty(_selectedFile.ErrorMessage))
+                        {
+                            <MudItem xs="12">
+                                <MudAlert Severity="Severity.Error">@_selectedFile.ErrorMessage</MudAlert>
+                            </MudItem>
+                        }
+
+                        <MudItem xs="12">
+                            <MudText Typo="Typo.h6">Progress</MudText>
+                            <MudProgressLinear Color="@GetProgressColor(_selectedFile.State)" Striped="true" Size="Size.Large" Value="@_selectedFile.Progress">
+                                <MudText Typo="Typo.subtitle1" Color="Color.Dark"><b>@_selectedFile.Progress%</b></MudText>
+                            </MudProgressLinear>
+                        </MudItem>
+
+                        @if (!string.IsNullOrEmpty(_selectedFile.ExtractedText))
+                        {
+                            <MudItem xs="12" Class="mt-4">
+                                <div class="d-flex justify-space-between align-center mb-2">
+                                    <MudText Typo="Typo.h6">Extracted Text Preview</MudText>
+                                    <MudButton Variant="Variant.Outlined" Color="Color.Success" StartIcon="@Icons.Material.Filled.Download" OnClick="ExportJson">Export Result JSON</MudButton>
+                                </div>
+                                <MudTextField Value="@_selectedFile.ExtractedText" 
+                                              ReadOnly="true" 
+                                              Variant="Variant.Outlined" 
+                                              Lines="10" 
+                                              Adornment="Adornment.None"/>
+                            </MudItem>
+                        }
+                    </MudGrid>
+                }
+                else
+                {
+                    <div class="d-flex flex-column align-center justify-center" style="height: 100%;">
+                        <MudIcon Icon="@Icons.Material.Filled.TouchApp" Size="Size.Large" Color="Color.Default" />
+                        <MudText Typo="Typo.h6" Color="Color.Default" Class="mt-2">Select a file to view details</MudText>
+                    </div>
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+</MudContainer>
+
+@code {
+    private List<ActDictionaryDto> _dictionaries = new();
+    private string _dictionaryKey = "";
+    private List<BatchFileStatus> _files => BatchService.GetFiles();
+    private BatchFileStatus? _selectedFile;
+
+    private bool _canStart => !string.IsNullOrEmpty(_dictionaryKey) 
+                           && _files.Any(f => f.State == BatchFileState.Pending)
+                           && !_files.Any(f => f.State == BatchFileState.Uploading || f.State == BatchFileState.Parsing || f.State == BatchFileState.Analyzing);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _dictionaries = await ActService.GetDictionariesAsync();
+        if (_dictionaries.Any())
+        {
+            _dictionaryKey = _dictionaries.First().Key;
+        }
+        
+        BatchService.OnChange += StateHasChanged;
+    }
+
+    public void Dispose()
+    {
+        BatchService.OnChange -= StateHasChanged;
+    }
+
+    private async Task UploadFiles(IReadOnlyList<IBrowserFile> files)
+    {
+        await BatchService.AddFilesAsync(files);
+        // Auto select the first one if we have none selected
+        if (_selectedFile == null && files.Any())
+        {
+            _selectedFile = _files.Last(); // Select the latest added? Or first?
+            // Actually, let's select the first added one
+            if (_selectedFile == null) _selectedFile = _files.FirstOrDefault();
+        }
+    }
+
+    private async Task StartProcessing()
+    {
+        if (string.IsNullOrEmpty(_dictionaryKey)) return;
+        
+        // This runs in background
+        _ = BatchService.StartProcessingAsync(_dictionaryKey);
+        Snackbar.Add("Batch processing started!", Severity.Info);
+    }
+    
+    private void SelectFile(BatchFileStatus file)
+    {
+        _selectedFile = file;
+    }
+
+    private Color GetProgressColor(BatchFileState state)
+    {
+        return state switch
+        {
+            BatchFileState.Completed => Color.Success,
+            BatchFileState.Failed => Color.Error,
+            BatchFileState.Pending => Color.Default,
+            _ => Color.Info
+        };
+    }
+
+    private Severity GetSeverity(BatchFileState state)
+    {
+        return state switch
+        {
+            BatchFileState.Completed => Severity.Success,
+            BatchFileState.Failed => Severity.Error,
+            BatchFileState.Pending => Severity.Normal,
+            _ => Severity.Info
+        };
+    }
+
+    [Inject] IJSRuntime JS { get; set; }
+
+    private async Task ExportJson()
+    {
+        if (_selectedFile == null) return;
+        
+        var json = System.Text.Json.JsonSerializer.Serialize(_selectedFile, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        using var stream = new System.IO.MemoryStream(bytes);
+        using var streamRef = new DotNetStreamReference(stream);
+        await JS.InvokeVoidAsync("window.downloadFileFromStream", $"{Path.GetFileNameWithoutExtension(_selectedFile.FileName)}_result.json", streamRef);
+    }
+}

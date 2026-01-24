@@ -1,0 +1,100 @@
+@page "/"
+
+@using ACT.Services
+@inject IREnvironmentService RService
+@inject IActService ActService
+@inject IConversationService ConversationService
+
+<div class="d-flex flex-column align-center justify-center mb-8">
+    <MudImage Src="img/logo.png" Alt="ACT Logo" Height="256" Class="mb-4" ObjectFit="ObjectFit.Contain" />
+    <MudText Typo="Typo.h4" Align="Align.Center" GutterBottom="true">Affect Control Theory</MudText>
+    <MudText Typo="Typo.subtitle1" Align="Align.Center">
+        Research and Analysis Tool
+    </MudText>
+    <MudText Typo="Typo.caption" Align="Align.Center" Class="mt-2">
+        Based on the original work at <MudLink Href="https://affectcontroltheory.org" Target="_blank">affectcontroltheory.org</MudLink>
+    </MudText>
+</div>
+
+<MudStack Row="true" Class="mb-4">
+    <MudChip T="string" Color="@(_rAvailable ? Color.Success : Color.Error)" Icon="@(_rAvailable ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.Error)">
+        @(_rAvailable ? "R Runtime Available" : "R Runtime Missing")
+    </MudChip>
+    @if (_rAvailable)
+    {
+        <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.Info">Version: @_rVersion</MudChip>
+        @if (_dictionaries != null)
+        {
+            <MudChip T="string" Color="Color.Primary" Icon="@Icons.Material.Filled.LibraryBooks">Dictionaries: @_dictionaries.Count</MudChip>
+        }
+    }
+</MudStack>
+
+@if (_rAvailable && _packageStatuses != null)
+{
+    <MudText Typo="Typo.h6" Class="mt-4">R Packages</MudText>
+    <MudStack Row="true" Class="mb-4" Wrap="Wrap.Wrap">
+        @foreach (var pkg in _packageStatuses)
+        {
+            <MudChip T="string" Color="@(pkg.IsInstalled ? Color.Success : Color.Error)" Icon="@(pkg.IsInstalled ? Icons.Material.Filled.Check : Icons.Material.Filled.Close)">
+                @pkg.PackageName
+            </MudChip>
+        }
+    </MudStack>
+}
+
+<MudText Typo="Typo.h6" Class="mt-4">Statistics</MudText>
+<MudGrid Class="mb-4">
+    <MudItem xs="12" sm="4">
+        <MudCard>
+            <MudCardContent>
+                <MudText Typo="Typo.h5">Conversations</MudText>
+                <MudText Typo="Typo.h3">@_conversationCount</MudText>
+            </MudCardContent>
+        </MudCard>
+    </MudItem>
+    <MudItem xs="12" sm="4">
+        <MudCard>
+            <MudCardContent>
+                <MudText Typo="Typo.h5">Situations</MudText>
+                <MudText Typo="Typo.h3">@_situationCount</MudText>
+            </MudCardContent>
+        </MudCard>
+    </MudItem>
+    <MudItem xs="12" sm="4">
+        <MudCard>
+            <MudCardContent>
+                <MudText Typo="Typo.h5">Events</MudText>
+                <MudText Typo="Typo.h3">@_eventCount</MudText>
+            </MudCardContent>
+        </MudCard>
+    </MudItem>
+</MudGrid>
+
+<MudAlert Severity="Severity.Normal">You can find documentation and examples on our website.</MudAlert>
+
+@code {
+    private bool _rAvailable;
+    private string _rVersion = string.Empty;
+    private List<(string PackageName, bool IsInstalled)> _packageStatuses;
+    private List<ActDictionaryDto> _dictionaries;
+    
+    private int _conversationCount;
+    private int _situationCount;
+    private int _eventCount;
+
+    protected override async Task OnInitializedAsync()
+    {
+        (_rAvailable, _rVersion) = await RService.GetRInfoAsync();
+        if (_rAvailable)
+        {
+            _packageStatuses = await RService.GetPackagesStatusAsync();
+            _dictionaries = await ActService.GetDictionariesAsync();
+        }
+        
+        var conversations = await ConversationService.GetAllAsync();
+        _conversationCount = conversations.Count;
+        _situationCount = conversations.Sum(c => c.Situations.Count);
+        _eventCount = conversations.SelectMany(c => c.Situations).Sum(s => s.Events.Count);
+    }
+}

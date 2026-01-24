@@ -1,0 +1,404 @@
+@page "/conversations/new"
+@page "/conversations/{Id:guid}"
+@using ACT.Models
+@using ACT.Services
+@using System.Threading
+@inject IConversationService ConversationService
+@inject IActService ActService
+@inject IActProcessingService ActProcessingService
+@inject NavigationManager NavManager
+@inject ISnackbar Snackbar
+
+<MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
+    <MudText Typo="Typo.h4" GutterBottom="true">
+        @(_conversation.Id == Guid.Empty ? "New Conversation" : _conversation.Name)
+    </MudText>
+
+    <MudGrid>
+        <!-- Setup Section -->
+        <MudItem xs="12">
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.h6">Setup</MudText>
+                <MudGrid>
+                    <MudItem xs="12" md="6">
+                        <MudTextField @bind-Value="_conversation.Name" Label="Conversation Name" Variant="Variant.Outlined" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudSelect T="string" Label="Dictionary" @bind-Value="_conversation.DictionaryKey" Variant="Variant.Outlined" AnchorOrigin="Origin.BottomCenter" Disabled="@(_conversation.Persons.Any() || _conversation.Situations.Any())">
+                            @foreach (var dict in _dictionaries)
+                            {
+                                <MudSelectItem Value="@dict.Key">@dict.Key</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+                </MudGrid>
+            </MudPaper>
+        </MudItem>
+
+        <!-- Persons Section -->
+        <MudItem xs="12" md="4">
+            <MudPaper Class="pa-4" Style="height: 100%">
+                <div class="d-flex justify-space-between align-center mb-2">
+                    <MudText Typo="Typo.h6">Persons</MudText>
+                    <MudIconButton Icon="@Icons.Material.Filled.Add" Color="Color.Primary" OnClick="OpenAddPersonDialog" Disabled="@string.IsNullOrEmpty(_conversation.DictionaryKey)" />
+                </div>
+                
+                @if (!_conversation.Persons.Any())
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">No persons added yet.</MudText>
+                }
+                else
+                {
+                    <MudList T="Person" Dense="true">
+                        @foreach (var person in _conversation.Persons)
+                        {
+                            <MudListItem>
+                                <MudText><b>@person.Name</b> (@person.Identity)</MudText>
+                                <MudText Typo="Typo.caption">@person.Gender</MudText>
+                            </MudListItem>
+                        }
+                    </MudList>
+                }
+            </MudPaper>
+        </MudItem>
+
+        <!-- situations & Events Section -->
+        <MudItem xs="12" md="8">
+             <MudPaper Class="pa-4" Style="height: 100%">
+                <div class="d-flex justify-space-between align-center mb-2">
+                    <MudText Typo="Typo.h6">Situations</MudText>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="AddSituation" Disabled="@(!_conversation.Persons.Any())">Add Situation</MudButton>
+                </div>
+
+                @if (!_conversation.Situations.Any())
+                {
+                     <MudText Typo="Typo.body2" Color="Color.Secondary">Add a situation to start modeling events.</MudText>
+                }
+                else
+                {
+                    <MudExpansionPanels MultiExpansion="true">
+                        @foreach (var situation in _conversation.Situations)
+                        {
+                            <MudExpansionPanel Text="@($"Situation: {situation.Type}")">
+                                <TitleContent>
+                                    <div class="d-flex align-center gap-4">
+                                        <MudText><b>@situation.Type</b></MudText>
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Info">@situation.Events.Count Events</MudChip>
+                                    </div>
+                                </TitleContent>
+                                <ChildContent>
+                                    <!-- Events List -->
+                                    <div class="d-flex flex-column gap-2 mb-4">
+                                        @foreach (var evt in situation.Events)
+                                        {
+                                            <MudCard Elevation="1" Class="pa-2">
+                                                <div class="d-flex align-center gap-2">
+                                                    <MudText Color="Color.Primary"><b>@evt.Actor.Name</b> (@evt.Actor.Identity)</MudText>
+                                                    <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                                    <MudText Class="font-italic">@evt.Behavior</MudText>
+                                                    <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                                    <MudText Color="Color.Secondary"><b>@evt.Object.Name</b> (@evt.Object.Identity)</MudText>
+                                                </div>
+                                                @if (evt.Result != null)
+                                                {
+                                                    <div class="mt-2">
+                                                        <MudText Typo="Typo.caption" Class="mb-1"><b>Deflection:</b> @evt.Result.Deflection.ToString("F2")</MudText>
+                                                        <div class="d-flex gap-4 flex-wrap">
+                                                            @if (evt.Result.TransientActorEPA != null && evt.Result.TransientActorEPA.Length == 3)
+                                                            {
+                                                                <MudText Typo="Typo.caption"><b>Actor EPA:</b> E=@evt.Result.TransientActorEPA[0].ToString("F2"), P=@evt.Result.TransientActorEPA[1].ToString("F2"), A=@evt.Result.TransientActorEPA[2].ToString("F2")</MudText>
+                                                            }
+                                                            @if (evt.Result.TransientBehaviorEPA != null && evt.Result.TransientBehaviorEPA.Length == 3)
+                                                            {
+                                                                <MudText Typo="Typo.caption"><b>Behavior EPA:</b> E=@evt.Result.TransientBehaviorEPA[0].ToString("F2"), P=@evt.Result.TransientBehaviorEPA[1].ToString("F2"), A=@evt.Result.TransientBehaviorEPA[2].ToString("F2")</MudText>
+                                                            }
+                                                            @if (evt.Result.TransientObjectEPA != null && evt.Result.TransientObjectEPA.Length == 3)
+                                                            {
+                                                                <MudText Typo="Typo.caption"><b>Object EPA:</b> E=@evt.Result.TransientObjectEPA[0].ToString("F2"), P=@evt.Result.TransientObjectEPA[1].ToString("F2"), A=@evt.Result.TransientObjectEPA[2].ToString("F2")</MudText>
+                                                            }
+                                                        </div>
+                                                    </div>
+                                                }
+                                            </MudCard>
+                                        }
+                                    </div>
+
+                                    <!-- Add Event Form -->
+                                    <MudPaper Class="pa-3" Elevation="0" Outlined="true">
+                                        <MudText Typo="Typo.subtitle2" Class="mb-2">New Event</MudText>
+                                        <MudGrid>
+                                            <MudItem xs="4">
+                                                <MudSelect T="Person" Label="Actor" @bind-Value="_newEventActor" Variant="Variant.Outlined" Dense="true">
+                                                    @foreach (var p in _conversation.Persons)
+                                                    {
+                                                        <MudSelectItem Value="@p">@p.Name</MudSelectItem>
+                                                    }
+                                                </MudSelect>
+                                            </MudItem>
+                                            <MudItem xs="4">
+                                                <MudAutocomplete T="string" Label="Behavior" @bind-Value="_newEventBehavior" SearchFunc="@SearchBehaviors" Variant="Variant.Outlined" Dense="true" />
+                                            </MudItem>
+                                            <MudItem xs="4">
+                                                 <MudSelect T="Person" Label="Object" @bind-Value="_newEventObject" Variant="Variant.Outlined" Dense="true">
+                                                    @foreach (var p in _conversation.Persons)
+                                                    {
+                                                        <MudSelectItem Value="@p">@p.Name</MudSelectItem>
+                                                    }
+                                                </MudSelect>
+                                            </MudItem>
+                                            <MudItem xs="12" Class="d-flex justify-end">
+                                                <MudButton Variant="Variant.Filled" Color="Color.Secondary" Size="Size.Small" OnClick="@(() => AddEvent(situation))" Disabled="@(!CanAddEvent)">Calculate & Add</MudButton>
+                                            </MudItem>
+                                        </MudGrid>
+                                    </MudPaper>
+                                </ChildContent>
+                            </MudExpansionPanel>
+                        }
+                    </MudExpansionPanels>
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+    
+    <div class="mt-4 d-flex justify-end">
+        <MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="Cancel" Class="mr-2">Cancel</MudButton>
+        <MudButton Variant="Variant.Outlined" Color="Color.Success" OnClick="ExportJson" Class="mr-2">Export JSON</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveConversation">Save Conversation</MudButton>
+    </div>
+
+</MudContainer>
+
+<!-- Add Person Dialog -->
+<!-- Add Person Dialog -->
+<MudOverlay @bind-Visible="_isAddPersonOpen" DarkBackground="true" AutoClose="false" ZIndex="9999">
+    <MudPaper Class="pa-4" Width="300px">
+        <MudText Typo="Typo.h6" GutterBottom="true">Add Person</MudText>
+        <MudTextField @bind-Value="_newPersonName" Label="Name" Variant="Variant.Outlined" Class="mb-3" />
+        <MudAutocomplete T="string" Label="Identity" @bind-Value="_newPersonIdentity" SearchFunc="@SearchIdentities" Variant="Variant.Outlined" Class="mb-3" />
+        <MudSelect T="string" Label="Gender" @bind-Value="_newPersonGender" Variant="Variant.Outlined" Class="mb-4">
+            <MudSelectItem Value="@("male")">Male</MudSelectItem>
+            <MudSelectItem Value="@("female")">Female</MudSelectItem>
+            <MudSelectItem Value="@("avg")">Average</MudSelectItem>
+        </MudSelect>
+        <div class="d-flex justify-end gap-2">
+            <MudButton OnClick="@(() => _isAddPersonOpen = false)">Cancel</MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="AddPerson">Add</MudButton>
+        </div>
+    </MudPaper>
+</MudOverlay>
+
+
+@code {
+    [Parameter] public Guid? Id { get; set; }
+
+    private Conversation _conversation = new();
+    private List<ActDictionaryDto> _dictionaries = new();
+    private List<string> _identities = new();
+    private List<string> _behaviors = new(); // Cache behaviors
+
+    // Person Dialog
+    private bool _isAddPersonOpen;
+    private string _newPersonName;
+    private string _newPersonIdentity;
+    private string _newPersonGender = "avg";
+
+    // New Event Form
+    private Person _newEventActor;
+    private Person _newEventObject;
+    private string _newEventBehavior;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _dictionaries = await ActService.GetDictionariesAsync();
+
+        if (Id.HasValue && Id.Value != Guid.Empty)
+        {
+            var existing = await ConversationService.GetByIdAsync(Id.Value);
+            if (existing != null)
+            {
+                _conversation = existing;
+                if (!string.IsNullOrEmpty(_conversation.DictionaryKey))
+                {
+                    await LoadDictionaryData(_conversation.DictionaryKey);
+                }
+            }
+        }
+        else
+        {
+             // Draft mode
+             _conversation = new Conversation();
+        }
+    }
+
+    private async Task LoadDictionaryData(string key)
+    {
+        _identities = await ActService.GetDictionaryIdentitiesAsync(key);
+        _behaviors = await ActService.GetDictionaryBehaviorsAsync(key);
+    }
+
+    // ... (OpenAddPersonDialog)
+
+    private async Task OpenAddPersonDialog()
+    {
+        Console.WriteLine("OpenAddPersonDialog called");
+        if (string.IsNullOrEmpty(_conversation.DictionaryKey))
+        {
+            Console.WriteLine("DictionaryKey is empty");
+            Snackbar.Add("Please select a dictionary first.", Severity.Warning);
+            return;
+        }
+
+        if (!_identities.Any())
+        {
+            Console.WriteLine("Loading identities...");
+            await LoadDictionaryData(_conversation.DictionaryKey);
+            Console.WriteLine($"Loaded {_identities.Count} identities");
+        }
+        
+        _newPersonName = $"Person {_conversation.Persons.Count + 1}";
+        _newPersonIdentity = "";
+        _newPersonGender = "avg";
+        _isAddPersonOpen = true;
+        Console.WriteLine("Dialog Open set to true");
+        StateHasChanged(); // Force update
+    }
+
+    private async Task<IEnumerable<string>> SearchIdentities(string value, CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(value))
+            return _identities.Take(50);
+        return _identities.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)).Take(50);
+    }
+
+    private async Task<IEnumerable<string>> SearchBehaviors(string value, CancellationToken token)
+    {
+         if (string.IsNullOrEmpty(value))
+            return _behaviors.Take(50);
+        return _behaviors.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)).Take(50);
+    }
+
+
+    private async Task AddPerson()
+    {
+        if (string.IsNullOrWhiteSpace(_newPersonName) || string.IsNullOrWhiteSpace(_newPersonIdentity))
+            return;
+
+        var p = new Person { Name = _newPersonName, Identity = _newPersonIdentity, Gender = _newPersonGender };
+        
+        if (Id.HasValue) 
+        {
+            await ConversationService.AddPersonAsync(_conversation.Id, p);
+             // Person added to DB list. We also update local list to show it.
+             // Note: AddPersonAsync checks duplication.
+             if (!_conversation.Persons.Any(px => px.Name == p.Name))
+             {
+                 _conversation.Persons.Add(p);
+             }
+        }
+        else
+        {
+             _conversation.Persons.Add(p);
+        }
+
+        _isAddPersonOpen = false;
+    }
+
+    private async Task AddSituation()
+    {
+        var typeName = $"Situation {_conversation.Situations.Count + 1}";
+        if (Id.HasValue)
+        {
+            var s = await ConversationService.AddSituationAsync(_conversation.Id, typeName);
+            // Service returns the situation object
+            // We need to add it locally or reload? 
+            // The service modifies the conversation object if it was the same reference, but here it's likely different scope?
+            // Actually ConversationService is Scoped, so 'GetById' probably returns a specific instance.
+            // But we stored '_conversation' in the component.
+            // Safe bet is to append locally.
+            // However, the ID of the new situation is important!
+            _conversation.Situations.Add(s);
+        }
+        else
+        {
+             _conversation.Situations.Add(new Situation { Type = typeName });
+        }
+    }
+
+    private bool CanAddEvent => _newEventActor != null && _newEventObject != null && !string.IsNullOrWhiteSpace(_newEventBehavior);
+
+    private async Task AddEvent(Situation situation)
+    {
+        if (!CanAddEvent) return;
+
+        var interaction = new Interaction
+        {
+            Actor = _newEventActor,
+            Object = _newEventObject,
+            Behavior = _newEventBehavior
+        };
+
+        try 
+        {
+            // Calculate EPA
+            // Note: ActProcessingService expects Identity strings.
+            // Pass the Interaction object which has Persons with Identities.
+            var result = await ActProcessingService.CalculateInteractionAsync(interaction);
+            interaction.Result = result;
+            
+            if (Id.HasValue)
+            {
+                 await ConversationService.AddEventAsync(_conversation.Id, situation, interaction);
+                 // Need to find situation in local object and add event
+                 var localSit = _conversation.Situations.FirstOrDefault(s => s.Id == situation.Id);
+                 if (localSit != null) localSit.Events.Add(interaction);
+            }
+            else
+            {
+                 situation.Events.Add(interaction);
+            }
+            
+            // Clear form
+            _newEventBehavior = "";
+            // Keep actors/objects selected? Maybe clear.
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Calculation failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task SaveConversation()
+    {
+        if (!Id.HasValue) // New
+        {
+             // Create real one
+             var created = await ConversationService.CreateAsync(_conversation.Name, _conversation.DictionaryKey);
+             created.Persons = _conversation.Persons;
+             created.Situations = _conversation.Situations;
+             
+             await ConversationService.UpdateAsync(created);
+             _conversation = created;
+        }
+        else
+        {
+             await ConversationService.UpdateAsync(_conversation);
+        }
+        NavManager.NavigateTo("/conversations");
+    }
+
+    private void Cancel()
+    {
+        NavManager.NavigateTo("/conversations");
+    }
+
+    [Inject] IJSRuntime JS { get; set; }
+
+    private async Task ExportJson()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(_conversation, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        using var stream = new System.IO.MemoryStream(bytes);
+        using var streamRef = new DotNetStreamReference(stream);
+        await JS.InvokeVoidAsync("window.downloadFileFromStream", $"conversation-{_conversation.Name.Replace(" ", "_")}.json", streamRef);
+    }
+}
