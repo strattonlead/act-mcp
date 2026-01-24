@@ -3,11 +3,19 @@
 ## Overview
 ACT-MCP is an application that integrates **Affect Control Theory (ACT)** with the **Model Context Protocol (MCP)**. It leverages **ASP.NET Core** for the backend, **R** for statistical analytics and ACT calculations, and **MongoDB** for data persistence.
 
+
 ## Technologies
 - **ASP.NET Core** (Backend)
 - **R** (Analytics via `ahcombs/actdata`, `ahcombs/bayesactR`, `ekmaloney/inteRact`)
 - **MongoDB** (Database)
 - **Docker** (Containerization)
+
+## Inspiration & References
+
+This project is inspired by **Affect Control Theory (ACT)** and the **Interact** software.
+
+-   **Original Project Website**: [Interact - Affect Control Theory](https://www.indiana.edu/~socpsy/ACT/index.htm)
+-   **Reference Guide**: [InteractGuide.pdf](ACT/InteractGuide.pdf)
 
 ## Environment Variables
 

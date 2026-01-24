@@ -4,6 +4,7 @@
 @inject IREnvironmentService RService
 @inject IActService ActService
 @inject IConversationService ConversationService
+@inject NavigationManager NavManager
 
 <div class="d-flex flex-column align-center justify-center mb-8">
     <MudImage Src="img/logo.png" Alt="ACT Logo" Height="256" Class="mb-4" ObjectFit="ObjectFit.Contain" />
@@ -15,6 +16,10 @@
         Based on the original work at <MudLink Href="https://affectcontroltheory.org" Target="_blank">affectcontroltheory.org</MudLink>
     </MudText>
 </div>
+
+<MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-4">
+    <MudText><b>MCP Endpoint:</b> @_mcpUrl</MudText>
+</MudAlert>
 
 <MudStack Row="true" Class="mb-4">
     <MudChip T="string" Color="@(_rAvailable ? Color.Success : Color.Error)" Icon="@(_rAvailable ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.Error)">
@@ -71,8 +76,6 @@
     </MudItem>
 </MudGrid>
 
-<MudAlert Severity="Severity.Normal">You can find documentation and examples on our website.</MudAlert>
-
 @code {
     private bool _rAvailable;
     private string _rVersion = string.Empty;
@@ -82,9 +85,11 @@
     private int _conversationCount;
     private int _situationCount;
     private int _eventCount;
+    private string _mcpUrl;
 
     protected override async Task OnInitializedAsync()
     {
+        _mcpUrl = NavManager.ToAbsoluteUri("mcp/sse").ToString();
         (_rAvailable, _rVersion) = await RService.GetRInfoAsync();
         if (_rAvailable)
         {

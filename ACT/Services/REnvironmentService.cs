@@ -77,7 +77,7 @@ public class REnvironmentService : IREnvironmentService
 
         // Construct R code to check packages
         // We will output: "pkg:TRUE|FALSE" per line
-        var rCode = string.Join("\n", packagesToCheck.Select(p => $"cat(sprintf('{p}:%s\\n', requireNamespace('{p}', quietly=TRUE)))"));
+        var rCode = string.Join("; ", packagesToCheck.Select(p => $"cat(sprintf('{p}:%s\\n', requireNamespace('{p}', quietly=TRUE)))"));
         
         try 
         {
