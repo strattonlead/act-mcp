@@ -13,6 +13,7 @@ public interface IConversationService
     Task<Conversation?> GetLatestBySessionIdAsync(string sessionId);
     Task<Conversation> CreateAsync(string name, string dictionaryKey);
     Task AddPersonAsync(Guid conversationId, Person person);
+    Task ClearPersonsAsync(Guid conversationId);
     Task<Situation> AddSituationAsync(Guid conversationId, string type);
     Task AddEventAsync(Guid conversationId, Situation situation, Interaction interaction);
     Task UpdateAsync(Conversation conversation);
@@ -69,6 +70,16 @@ public class ConversationService : IConversationService
         if (!conv.Persons.Any(p => p.Name == person.Name))
         {
             conv.Persons.Add(person);
+            await _repository.UpdateAsync(conv);
+        }
+    }
+
+    public async Task ClearPersonsAsync(Guid conversationId)
+    {
+        var conv = await _repository.GetByIdAsync(conversationId);
+        if (conv != null)
+        {
+            conv.Persons.Clear();
             await _repository.UpdateAsync(conv);
         }
     }

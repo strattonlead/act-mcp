@@ -1,11 +1,11 @@
+using ACT.Models;
+using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using ACT.Models;
-using Microsoft.AspNetCore.Components.Forms;
-using Microsoft.Extensions.Logging;
 
 namespace ACT.Services;
 
@@ -25,10 +25,10 @@ public class BatchEvaluationService : IBatchEvaluationService
     private readonly IConversationService _conversationService;
     private readonly IActService _actService;
     private readonly IActProcessingService _actProcessingService;
+    private readonly IFileRepository _fileRepository;
+    private readonly IBatchFileStatusService _fileStatusService;
     private readonly ILogger<BatchEvaluationService> _logger;
 
-    private readonly List<BatchFileStatus> _files = new();
-    
     // We need to temporarily hold streams or rely on the UI needed to upload them immediately?
     // IBrowserFile streams are fragile. 
     // Strategy: When AddFilesAsync is called, we create the status objects.
@@ -37,12 +37,12 @@ public class BatchEvaluationService : IBatchEvaluationService
     // To safe memory, we will process them one by one?
     // User requested: "add multiple files ... and the programm evaluates them automatically"
     // "for every file a progress bar ... user can click ... updated in realtime"
-    
+
     // Storing Streams in the service is risky if the circuit breaks?
     // Let's assume we handle the file content reading at the beginning of the process loop or eagerly.
     // For robust implementation given the constraints, I will hold a reference to IBrowserFile but be aware it might timeout if the process is long.
     // Better: Read to temporary file or MemoryStream upon "Add".
-    
+
     private readonly Dictionary<Guid, (Stream Stream, string FileName, string ContentType)> _pendingStreams = new();
 
     public event Action? OnChange;
@@ -54,6 +54,8 @@ public class BatchEvaluationService : IBatchEvaluationService
         IConversationService conversationService,
         IActService actService,
         IActProcessingService actProcessingService,
+        IFileRepository fileRepository,
+        IBatchFileStatusService fileStatusService,
         ILogger<BatchEvaluationService> logger)
     {
         _s3Service = s3Service;
@@ -62,15 +64,18 @@ public class BatchEvaluationService : IBatchEvaluationService
         _conversationService = conversationService;
         _actService = actService;
         _actProcessingService = actProcessingService;
+        _fileRepository = fileRepository;
+        _fileStatusService = fileStatusService;
         _logger = logger;
     }
 
-    public List<BatchFileStatus> GetFiles() => _files;
+    public List<BatchFileStatus> GetFiles() => _fileStatusService.GetAll();
 
     public async Task AddFilesAsync(IReadOnlyList<IBrowserFile> files)
     {
         foreach (var file in files)
         {
+
             var status = new BatchFileStatus
             {
                 FileName = file.Name,
@@ -78,16 +83,16 @@ public class BatchEvaluationService : IBatchEvaluationService
                 Size = file.Size,
                 State = BatchFileState.Pending
             };
-            _files.Add(status);
+            _fileStatusService.Add(status);
 
             // Copy to memory stream to avoid IBrowserFile timeout issues during later processing
             // Limit 10MB per file for safety
             var ms = new MemoryStream();
             await file.OpenReadStream(10 * 1024 * 1024).CopyToAsync(ms);
             ms.Position = 0;
-            
+
             _pendingStreams[status.Id] = (ms, file.Name, file.ContentType);
-            
+
             NotifyStateChanged();
         }
     }
@@ -97,7 +102,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         // Get Dictionary Data first
         List<string> identities = new();
         List<string> behaviors = new();
-        try 
+        try
         {
             identities = await _actService.GetDictionaryIdentitiesAsync(dictionaryKey);
             behaviors = await _actService.GetDictionaryBehaviorsAsync(dictionaryKey);
@@ -111,12 +116,12 @@ public class BatchEvaluationService : IBatchEvaluationService
 
         // Process files one by one (or parallel with Semaphore)
         // Sequential for now to be safe with LLM rate limits
-        foreach (var fileStatus in _files.Where(f => f.State == BatchFileState.Pending).ToList())
+        foreach (var fileStatus in _fileStatusService.GetAll().Where(f => f.State == BatchFileState.Pending).ToList())
         {
             if (!_pendingStreams.ContainsKey(fileStatus.Id)) continue;
-            
+
             var (stream, fileName, contentType) = _pendingStreams[fileStatus.Id];
-            
+
             try
             {
                 // If forcedIdentities provided, explicitly use them. 
@@ -125,9 +130,9 @@ public class BatchEvaluationService : IBatchEvaluationService
                 // However, we should also probably validate they exist in the dictionary? 
                 // Creating a hybrid list or just passing forced? 
                 // Plan said: "Set availableIdentities to ONLY this list".
-                
-                var targetIdentities = (forcedIdentities != null && forcedIdentities.Any()) 
-                    ? forcedIdentities 
+
+                var targetIdentities = (forcedIdentities != null && forcedIdentities.Any())
+                    ? forcedIdentities
                     : identities;
 
                 await ProcessFileAsync(fileStatus, stream, dictionaryKey, targetIdentities, behaviors);
@@ -149,8 +154,8 @@ public class BatchEvaluationService : IBatchEvaluationService
     }
 
     private async Task ProcessFileAsync(
-        BatchFileStatus status, 
-        Stream stream, 
+        BatchFileStatus status,
+        Stream stream,
         string dictionaryKey,
         List<string> availableIdentities,
         List<string> availableBehaviors)
@@ -160,8 +165,8 @@ public class BatchEvaluationService : IBatchEvaluationService
         status.StatusMessage = "Uploading to S3...";
         status.Progress = 10;
         NotifyStateChanged();
-        
-        await _s3Service.UploadFileAsync(stream, status.FileName, status.ContentType);
+
+        var uploaded = await _s3Service.UploadFileAsync(stream, status.FileName, status.ContentType);
 
         // 2. Parse Text
         status.State = BatchFileState.Parsing;
@@ -170,7 +175,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         NotifyStateChanged();
 
         status.ExtractedText = await _fileParsingService.ExtractTextAsync(stream, status.FileName);
-        
+
         if (string.IsNullOrWhiteSpace(status.ExtractedText))
         {
             throw new Exception("No text could be extracted from the file.");
@@ -181,11 +186,16 @@ public class BatchEvaluationService : IBatchEvaluationService
         status.StatusMessage = "Creating conversation...";
         status.Progress = 30;
         NotifyStateChanged();
-        
+
         var conversation = await _conversationService.CreateAsync(
-            Path.GetFileNameWithoutExtension(status.FileName), 
+            Path.GetFileNameWithoutExtension(status.FileName),
             dictionaryKey);
+
         status.ConversationId = conversation.Id;
+
+        // Link file to conversation
+        conversation.AttachedFileId = uploaded.Id;
+        await _conversationService.UpdateAsync(conversation);
 
         // 4. Analyze - Parse Messages
         status.State = BatchFileState.Analyzing;
@@ -194,12 +204,12 @@ public class BatchEvaluationService : IBatchEvaluationService
         NotifyStateChanged();
 
         var parsedMessages = await _chatAgent.ParseMessagesAsync(status.ExtractedText);
-        
+
         // 5. Analyze - Label Identities
         status.StatusMessage = "Labeling identities...";
         status.Progress = 60;
         NotifyStateChanged();
-        
+
         var labeledSpeakers = await _chatAgent.LabelIdentitiesAsync(parsedMessages, availableIdentities);
         var speakerMap = labeledSpeakers.ToDictionary(s => s.OriginalLabel, s => s);
 
@@ -218,7 +228,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         status.StatusMessage = "Detecting situations...";
         status.Progress = 80;
         NotifyStateChanged();
-        
+
         var detectedSituations = await _chatAgent.DetectSituationsAsync(parsedMessages, labeledSpeakers, availableBehaviors);
 
         // 7. Calculate and Save
@@ -230,28 +240,28 @@ public class BatchEvaluationService : IBatchEvaluationService
         {
             var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
             // Optionally set description if Situation model supports it
-            
+
             foreach (var evt in detSit.Events)
             {
                 // Create Interaction
                 var actorSpeaker = speakerMap.GetValueOrDefault(evt.ActorSpeaker);
                 var objectSpeaker = speakerMap.GetValueOrDefault(evt.ObjectSpeaker);
-                
+
                 if (actorSpeaker != null && objectSpeaker != null)
                 {
                     var interaction = new Interaction
                     {
-                        Actor = new Person 
-                        { 
-                            Name = actorSpeaker.DisplayName, 
+                        Actor = new Person
+                        {
+                            Name = actorSpeaker.DisplayName,
                             Identity = actorSpeaker.Identity,
-                            Gender = "avg" 
+                            Gender = "avg"
                         },
-                        Object = new Person 
-                        { 
-                            Name = objectSpeaker.DisplayName, 
-                            Identity = objectSpeaker.Identity, 
-                            Gender = "avg" 
+                        Object = new Person
+                        {
+                            Name = objectSpeaker.DisplayName,
+                            Identity = objectSpeaker.Identity,
+                            Gender = "avg"
                         },
                         Behavior = evt.Behavior
                     };
@@ -261,7 +271,7 @@ public class BatchEvaluationService : IBatchEvaluationService
                     {
                         var result = await _actProcessingService.CalculateInteractionAsync(interaction);
                         interaction.Result = result;
-                        
+
                         // Add to Conversation Structure
                         await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
                     }
@@ -279,5 +289,5 @@ public class BatchEvaluationService : IBatchEvaluationService
         NotifyStateChanged();
     }
 
-    private void NotifyStateChanged() => OnChange?.Invoke();
+    private void NotifyStateChanged() => _fileStatusService.NotifyStateChanged();
 }

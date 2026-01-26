@@ -11,6 +11,9 @@
 @inject IS3Service S3Service
 @inject NavigationManager NavManager
 @inject ISnackbar Snackbar
+@inject IAutoEvaluationService AutoEvaluationService
+@inject IBatchFileStatusService BatchFileStatusService
+@implements IDisposable
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
 
@@ -57,9 +60,40 @@
                          {
                              <MudProgressCircular Indeterminate="true" Size="Size.Small" Class="ml-2" />
                          }
-                         @if (_attachedFile != null)
+                          @if (_attachedFile != null)
                          {
                              <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.AttachFile" Class="ml-2">@_attachedFile.FileName</MudChip>
+
+                             @if (!_conversation.Situations.Any() && !AutoEvaluationService.IsProcessing(_conversation.Id))
+                             {
+                                 <MudButton Variant="Variant.Filled" 
+                                            Color="Color.Secondary" 
+                                            Class="ml-4" 
+                                            StartIcon="@Icons.Material.Filled.AutoAwesome"
+                                            OnClick="StartAutoEval">
+                                     Auto Eval
+                                 </MudButton>
+                             }
+                         }
+
+                         @if (AutoEvaluationService.IsProcessing(_conversation.Id))
+                         {
+                             var status = AutoEvaluationService.GetProcessingStatus(_conversation.Id);
+                             <div class="d-flex align-center ml-4 gap-2">
+                                 <MudProgressCircular Indeterminate="true" Size="Size.Small" Color="Color.Secondary" />
+                                 <MudText Typo="Typo.caption">@status.Status (@status.Progress%)</MudText>
+                             </div>
+                         }
+                         
+                         @{
+                             var batchStatus = BatchFileStatusService.GetByConversationId(_conversation.Id);
+                             if (batchStatus != null && batchStatus.State != BatchFileState.Completed && batchStatus.State != BatchFileState.Failed)
+                             {
+                                 <div class="d-flex align-center ml-4 gap-2">
+                                     <MudProgressCircular Indeterminate="false" Value="@batchStatus.Progress" Max="100" Size="Size.Small" Color="Color.Success" />
+                                     <MudText Typo="Typo.caption">@batchStatus.StatusMessage (@batchStatus.Progress%)</MudText>
+                                 </div>
+                             }
                          }
                     </MudItem>
                 </MudGrid>
@@ -225,7 +259,7 @@
     <div class="mt-4 d-flex justify-end">
         <MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="Cancel" Class="mr-2">Cancel</MudButton>
         <MudButton Variant="Variant.Outlined" Color="Color.Success" OnClick="ExportJson" Class="mr-2">Export JSON</MudButton>
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveConversation">Save Conversation</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => SaveConversation(true))">Save Conversation</MudButton>
     </div>
     }
 </MudContainer>
@@ -280,6 +314,8 @@
     private ChartOptions _chartOptions = new() { YAxisLines = true, ChartPalette = new[] { "#594AE2", "#00C853", "#FFAB00", "#FF1744" } };
     // Colors: Primary (Purple), Green (Likely), Amber (Wait?), Red (Unlikely)
     
+    private int _lastBatchProgress = 0;
+
     // Visualization Blocks
     private class SituationBlock
     {
@@ -292,6 +328,8 @@
 
     protected override async Task OnInitializedAsync()
     {
+        AutoEvaluationService.OnProcessingStateChanged += HandleProcessingStateChanged;
+        BatchFileStatusService.OnChange += HandleBatchStateChanged;
         _isLoading = true;
         try
         {
@@ -324,6 +362,55 @@
         finally
         {
             _isLoading = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        AutoEvaluationService.OnProcessingStateChanged -= HandleProcessingStateChanged;
+        BatchFileStatusService.OnChange -= HandleBatchStateChanged;
+    }
+
+    private async void HandleProcessingStateChanged(Guid conversationId)
+    {
+        if (_conversation.Id == conversationId)
+        {
+            await InvokeAsync(async () => 
+            {
+                // If finished (not processing anymore), reload the conversation to show results
+                if (!AutoEvaluationService.IsProcessing(conversationId))
+                {
+                    await ReloadConversation();
+                }
+                StateHasChanged();
+            });
+        }
+    }
+
+    private void HandleBatchStateChanged()
+    {
+        InvokeAsync(async () => 
+        {
+            var status = BatchFileStatusService.GetByConversationId(_conversation.Id);
+            if (status != null && status.Progress > _lastBatchProgress)
+            {
+                _lastBatchProgress = status.Progress;
+                await ReloadConversation();
+            }
+            StateHasChanged();
+        });
+    }
+    
+    private async Task ReloadConversation()
+    {
+        if (Id.HasValue)
+        {
+             var existing = await ConversationService.GetByIdAsync(Id.Value);
+             if (existing != null)
+             {
+                 _conversation = existing;
+                 UpdateChart();
+             }
         }
     }
 
@@ -439,13 +526,14 @@
         }
     }
 
-    private async Task SaveConversation()
+    private async Task SaveConversation(bool navigateToList)
     {
         if (!Id.HasValue)
         {
              var created = await ConversationService.CreateAsync(_conversation.Name, _conversation.DictionaryKey);
              created.Persons = _conversation.Persons;
              created.Situations = _conversation.Situations;
+             created.AttachedFileId = _conversation.AttachedFileId; // Persist attachment
              
              await ConversationService.UpdateAsync(created);
              _conversation = created;
@@ -454,7 +542,11 @@
         {
              await ConversationService.UpdateAsync(_conversation);
         }
-        NavManager.NavigateTo("/conversations");
+        
+        if (navigateToList)
+        {
+            NavManager.NavigateTo("/conversations");
+        }
     }
 
     private void Cancel()
@@ -497,20 +589,16 @@
             var key = $"{Guid.NewGuid()}-{fileName}";
             var bucket = Environment.GetEnvironmentVariable("S3_BUCKET_NAME") ?? "batch-evaluation";
 
-            await S3Service.UploadFileAsync(ms, key, contentType);
+            var uploaded = await S3Service.UploadFileAsync(ms, key, contentType);
 
-            var uploaded = new UploadedFile
-            {
-                FileName = fileName,
-                ContentType = contentType,
-                Size = size,
-                S3BucketName = bucket,
-                S3Key = key
-            };
-
-            await FileRepository.CreateAsync(uploaded);
             _conversation.AttachedFileId = uploaded.Id;
             _attachedFile = uploaded;
+
+            // Auto-save if conversation exists so the attachment is persisted immediately
+            if (Id.HasValue)
+            {
+                await ConversationService.UpdateAsync(_conversation);
+            }
             
             Snackbar.Add("File uploaded successfully", Severity.Success);
         }
@@ -584,5 +672,28 @@
         _series.Add(new ChartSeries { Name = "Unlikely Threshold (> 8.0)", Data = unlikelyLine.ToArray() });
         
         _xAxisLabels = labels.ToArray();
+    }
+    private async Task StartAutoEval()
+    {
+        if (_conversation.Id == Guid.Empty && !_conversation.AttachedFileId.HasValue) return;
+
+        bool isNew = !Id.HasValue;
+
+        // Save first (without navigating to list)
+        await SaveConversation(false);
+
+        // Fire evaluation (fire and forget pattern so we can update UI)
+        _ = AutoEvaluationService.EvaluateConversationAsync(_conversation.Id);
+
+        // If it was new, we must navigate to the Edit URL to stabilize the component identity
+        if (isNew)
+        {
+            NavManager.NavigateTo($"/conversations/{_conversation.Id}");
+        }
+        else
+        {
+            // If existing, just refresh state to show processing
+            StateHasChanged();
+        }
     }
 }

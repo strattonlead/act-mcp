@@ -16,6 +16,7 @@ public enum BatchFileState
 public class BatchFileStatus
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? UploadedFileId { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
     public long Size { get; set; }
@@ -24,7 +25,7 @@ public class BatchFileStatus
     public string StatusMessage { get; set; } = "Pending";
     public Guid? ConversationId { get; set; }
     public string? ErrorMessage { get; set; }
-    
+
     // Internal use for the file content
     // We won't store the stream here permanently, but we might pass it around or store the extracted text.
     public string? ExtractedText { get; set; }

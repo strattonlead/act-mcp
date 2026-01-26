@@ -1,3 +1,4 @@
+using ACT.Models;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Minio;
@@ -10,7 +11,8 @@ namespace ACT.Services;
 
 public interface IS3Service
 {
-    Task<string> UploadFileAsync(Stream stream, string fileName, string contentType);
+    Task<UploadedFile> UploadFileAsync(Stream stream, string fileName, string contentType);
+    Task<Stream> GetFileStreamAsync(string bucketName, string objectKey);
     Task DeleteFileAsync(string bucketName, string objectKey);
 }
 
@@ -19,15 +21,17 @@ public class S3Service : IS3Service
     private readonly ILogger<S3Service> _logger;
     private readonly IMinioClient _minioClient;
     private readonly string _bucketName;
+    private readonly IFileRepository _fileRepository;
 
-    public S3Service(IMinioClient minioClient, ILogger<S3Service> logger)
+    public S3Service(IMinioClient minioClient, ILogger<S3Service> logger, IFileRepository fileRepository)
     {
         _logger = logger;
         _bucketName = Environment.GetEnvironmentVariable("S3_BUCKET_NAME") ?? "batch-evaluation";
         _minioClient = minioClient;
+        _fileRepository = fileRepository;
     }
 
-    public async Task<string> UploadFileAsync(Stream stream, string fileName, string contentType)
+    public async Task<UploadedFile> UploadFileAsync(Stream stream, string fileName, string contentType)
     {
         try
         {
@@ -53,10 +57,17 @@ public class S3Service : IS3Service
 
             await _minioClient.PutObjectAsync(putObjectArgs);
 
-            // Return the object name or a pseudo URL
-            // Since this is Minio, we might not have a public URL easily constructed without knowing if it's http/https and port.
-            // Returning the object key (fileName) for reference.
-            return fileName;
+            var uploaded = new UploadedFile
+            {
+                FileName = fileName,
+                ContentType = contentType,
+                Size = stream.Length,
+                S3BucketName = _bucketName,
+                S3Key = fileName
+            };
+
+            await _fileRepository.CreateAsync(uploaded);
+            return uploaded;
         }
         catch (Exception ex)
         {
@@ -65,15 +76,39 @@ public class S3Service : IS3Service
         }
     }
 
+    public async Task<Stream> GetFileStreamAsync(string bucketName, string objectKey)
+    {
+        try
+        {
+            var ms = new MemoryStream();
+            var getObjectArgs = new GetObjectArgs()
+                .WithBucket(bucketName)
+                .WithObject(objectKey)
+                .WithCallbackStream((stream) =>
+                {
+                    stream.CopyTo(ms);
+                });
+
+            await _minioClient.GetObjectAsync(getObjectArgs);
+            ms.Position = 0;
+            return ms;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error getting file {objectKey} from {bucketName} in S3.");
+            throw;
+        }
+    }
+
     public async Task DeleteFileAsync(string bucketName, string objectKey)
     {
         try
         {
-             var removeObjectArgs = new RemoveObjectArgs()
-                .WithBucket(bucketName)
-                .WithObject(objectKey);
+            var removeObjectArgs = new RemoveObjectArgs()
+               .WithBucket(bucketName)
+               .WithObject(objectKey);
 
-             await _minioClient.RemoveObjectAsync(removeObjectArgs);
+            await _minioClient.RemoveObjectAsync(removeObjectArgs);
         }
         catch (Exception ex)
         {

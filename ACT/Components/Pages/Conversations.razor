@@ -5,6 +5,9 @@
 @inject NavigationManager NavManager
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IAutoEvaluationService AutoEvaluationService
+@inject IBatchFileStatusService BatchFileStatusService
+@implements IDisposable
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
     <div class="d-flex justify-space-between align-center mb-4">
@@ -23,8 +26,31 @@
                     <MudCard>
                         <MudCardContent>
                             <MudText Typo="Typo.h6">@conv.Name</MudText>
-                            <MudText Typo="Typo.body2">Dictionary: @conv.DictionaryKey</MudText>
+                            <div class="d-flex align-center gap-2">
+                                <MudText Typo="Typo.body2">Dictionary: @conv.DictionaryKey</MudText>
+                                @if (conv.AttachedFileId.HasValue)
+                                {
+                                    <MudIcon Icon="@Icons.Material.Filled.AttachFile" Size="Size.Small" Color="Color.Info" Title="File Attached" />
+                                }
+                            </div>
                             <MudText Typo="Typo.caption">Situations: @conv.Situations.Count</MudText>
+                            
+                            @if (AutoEvaluationService.IsProcessing(conv.Id))
+                            {
+                                var status = AutoEvaluationService.GetProcessingStatus(conv.Id);
+                                <MudText Typo="Typo.caption" Class="mt-2">@status.Status</MudText>
+                                <MudProgressLinear Color="Color.Info" Value="@status.Progress" Class="mt-1" />
+                            }
+
+                            
+                            @{
+                                var batchStatus = BatchFileStatusService.GetByConversationId(conv.Id);
+                                if (batchStatus != null && batchStatus.State != BatchFileState.Completed && batchStatus.State != BatchFileState.Failed)
+                                {
+                                     <MudText Typo="Typo.caption" Class="mt-2">@batchStatus.StatusMessage</MudText>
+                                     <MudProgressLinear Color="Color.Success" Value="@batchStatus.Progress" Class="mt-1" />
+                                }
+                            }
                         </MudCardContent>
                         <MudCardActions>
                             <MudButton Variant="Variant.Text" Color="Color.Primary" Href="@($"/conversations/{conv.Id}")">Open</MudButton>
@@ -53,7 +79,25 @@
 
     protected override async Task OnInitializedAsync()
     {
+        AutoEvaluationService.OnProcessingStateChanged += HandleProcessingStateChanged;
+        BatchFileStatusService.OnChange += HandleBatchStateChanged;
         await LoadConversations();
+    }
+
+    public void Dispose()
+    {
+        AutoEvaluationService.OnProcessingStateChanged -= HandleProcessingStateChanged;
+        BatchFileStatusService.OnChange -= HandleBatchStateChanged;
+    }
+
+    private void HandleProcessingStateChanged(Guid conversationId)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+    
+    private void HandleBatchStateChanged()
+    {
+        InvokeAsync(StateHasChanged);
     }
     
     private async Task LoadConversations()

@@ -67,6 +67,8 @@ builder.Services.AddS3Service(logger);
 builder.Services.AddScoped<IS3Service, S3Service>();
 builder.Services.AddScoped<IFileParsingService, FileParsingService>();
 builder.Services.AddScoped<IBatchEvaluationService, BatchEvaluationService>();
+builder.Services.AddSingleton<IBatchFileStatusService, BatchFileStatusService>();
+builder.Services.AddScoped<IAutoEvaluationService, AutoEvaluationService>();
 
 // Register Chat Client
 var openaiApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
