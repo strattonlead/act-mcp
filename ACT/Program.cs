@@ -6,6 +6,9 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using MudBlazor.Services;
 using OpenAI.Chat;
@@ -31,6 +34,15 @@ builder.Services.AddScoped<IActProcessingService, ActProcessingService>();
 var mongoConnectionString = Environment.GetEnvironmentVariable("MONGODB_CONNECTION_STRING");
 var mongoDatabaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE_NAME");
 
+try
+{
+    BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+}
+catch (BsonSerializationException)
+{
+    // Already registered
+}
+
 if (!string.IsNullOrEmpty(mongoConnectionString) && !string.IsNullOrEmpty(mongoDatabaseName))
 {
     var mongoClient = new MongoClient(mongoConnectionString);
@@ -43,10 +55,12 @@ else
 }
 
 builder.Services.AddScoped<IConversationRepository, MongoConversationRepository>();
+builder.Services.AddScoped<IFileRepository, MongoFileRepository>();
 builder.Services.AddScoped<IConversationService, ConversationService>();
 builder.Services.AddScoped<IChatAgent, ChatAgent>();
 builder.Services.AddActTool(); // Explicitly register ActTool for Controller usage
 builder.Services.AddSingleton<IActToolMonitor, ActToolMonitor>();
+builder.Services.AddSingleton<IActDataCache, ActDataCache>();
 builder.Services.AddS3Service(logger);
 
 // Batch Evaluation Services
@@ -56,14 +70,19 @@ builder.Services.AddScoped<IBatchEvaluationService, BatchEvaluationService>();
 
 // Register Chat Client
 var openaiApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-var openAiChatModel = Environment.GetEnvironmentVariable("OPENAI_CHAT_MODEL");
-// var ollamaEndpoint = Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT"); // Future support
+var chatModel = Environment.GetEnvironmentVariable("CHAT_MODEL");
+var ollamaEndpoint = Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT");
 
+IChatClient chatClient;
 if (!string.IsNullOrEmpty(openaiApiKey))
 {
-    // Configuring ChatClient
-    // Using AsIChatClient per documentation/user hint
-    builder.Services.AddChatClient(new ChatClient(openAiChatModel ?? "gpt-4o", openaiApiKey).AsIChatClient());
+    chatClient = new ChatClient(chatModel ?? "gpt-4o", openaiApiKey).AsIChatClient();
+    builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
+}
+else if (!string.IsNullOrWhiteSpace(ollamaEndpoint) && Uri.IsWellFormedUriString(ollamaEndpoint, UriKind.Absolute))
+{
+    chatClient = new OllamaSharp.OllamaApiClient(ollamaEndpoint, chatModel);
+    builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
 }
 else
 {
@@ -85,6 +104,10 @@ builder.Services.AddMcpServer()
     .WithHttpTransport()
     .WithToolsFromAssembly(Assembly.GetExecutingAssembly());
 
+// Session Tracking
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IMcpSessionService, McpSessionService>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -104,6 +127,7 @@ app.UseStaticFiles();
 app.UseAntiforgery();
 
 app.UseAuthorization();
+app.UseMiddleware<ACT.Middlewares.McpSessionMiddleware>();
 
 app.MapControllers();
 app.MapRazorComponents<App>()

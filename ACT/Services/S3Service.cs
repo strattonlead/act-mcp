@@ -11,6 +11,7 @@ namespace ACT.Services;
 public interface IS3Service
 {
     Task<string> UploadFileAsync(Stream stream, string fileName, string contentType);
+    Task DeleteFileAsync(string bucketName, string objectKey);
 }
 
 public class S3Service : IS3Service
@@ -60,6 +61,23 @@ public class S3Service : IS3Service
         catch (Exception ex)
         {
             _logger.LogError(ex, $"Error uploading {fileName} to S3.");
+            throw;
+        }
+    }
+
+    public async Task DeleteFileAsync(string bucketName, string objectKey)
+    {
+        try
+        {
+             var removeObjectArgs = new RemoveObjectArgs()
+                .WithBucket(bucketName)
+                .WithObject(objectKey);
+
+             await _minioClient.RemoveObjectAsync(removeObjectArgs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error deleting {objectKey} from {bucketName} in S3.");
             throw;
         }
     }

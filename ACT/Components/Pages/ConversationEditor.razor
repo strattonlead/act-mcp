@@ -3,18 +3,30 @@
 @using ACT.Models
 @using ACT.Services
 @using System.Threading
+@using System.IO
 @inject IConversationService ConversationService
 @inject IActService ActService
 @inject IActProcessingService ActProcessingService
+@inject IFileRepository FileRepository
+@inject IS3Service S3Service
 @inject NavigationManager NavManager
 @inject ISnackbar Snackbar
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
-    <MudText Typo="Typo.h4" GutterBottom="true">
-        @(_conversation.Id == Guid.Empty ? "New Conversation" : _conversation.Name)
-    </MudText>
 
-    <MudGrid>
+    @if (_isLoading)
+    {
+        <div class="d-flex justify-center align-center" style="height: 50vh;">
+            <MudProgressCircular Color="Color.Primary" Size="Size.Large" Indeterminate="true" />
+        </div>
+    }
+    else
+    {
+        <MudText Typo="Typo.h4" GutterBottom="true">
+            @(_conversation.Id == Guid.Empty ? "New Conversation" : _conversation.Name)
+        </MudText>
+
+        <MudGrid>
         <!-- Setup Section -->
         <MudItem xs="12">
             <MudPaper Class="pa-4">
@@ -30,6 +42,25 @@
                                 <MudSelectItem Value="@dict.Key">@dict.Key</MudSelectItem>
                             }
                         </MudSelect>
+                    </MudItem>
+                    <MudItem xs="12">
+                         <MudFileUpload T="IBrowserFile" Accept=".txt,.pdf,.docx" FilesChanged="UploadFiles">
+                             <ActivatorContent>
+                                 <MudButton Variant="Variant.Filled"
+                                            Color="Color.Primary"
+                                            StartIcon="@Icons.Material.Filled.CloudUpload">
+                                     Attach File
+                                 </MudButton>
+                             </ActivatorContent>
+                         </MudFileUpload>
+                         @if (_isUploading)
+                         {
+                             <MudProgressCircular Indeterminate="true" Size="Size.Small" Class="ml-2" />
+                         }
+                         @if (_attachedFile != null)
+                         {
+                             <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.AttachFile" Class="ml-2">@_attachedFile.FileName</MudChip>
+                         }
                     </MudItem>
                 </MudGrid>
             </MudPaper>
@@ -159,16 +190,46 @@
             </MudPaper>
         </MudItem>
     </MudGrid>
+
+    <MudPaper Class="mt-4 pa-4">
+        <MudText Typo="Typo.h6">Deflection Analysis</MudText>
+        <div class="d-flex gap-4">
+            <div style="flex-grow: 1;">
+                 <MudChart ChartType="ChartType.Line" ChartSeries="@_series" XAxisLabels="@_xAxisLabels" ChartOptions="@_chartOptions" Width="100%" Height="350px">
+                     <CustomGraphics>
+                         @foreach (var block in _situationBlocks)
+                         {
+                             <rect x="@(block.X.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))%" y="0" width="@(block.Width.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))%" height="300" fill="@block.Color" opacity="0.1" />
+                         }
+                     </CustomGraphics>
+                 </MudChart>
+            </div>
+        </div>
+        
+        <MudDivider Class="my-4" />
+        
+        <MudText Typo="Typo.h6" Class="mb-2">Conversation Timeline</MudText>
+        <MudTimeline TimelineOrientation="TimelineOrientation.Horizontal" TimelinePosition="TimelinePosition.Top">
+            @foreach (var sit in _conversation.Situations)
+            {
+                <MudTimelineItem Color="Color.Info" Variant="Variant.Filled">
+                    <ItemContent>
+                        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">@sit.Type</MudAlert>
+                        <MudText Typo="Typo.caption">@sit.Events.Count events</MudText>
+                    </ItemContent>
+                </MudTimelineItem>
+            }
+        </MudTimeline>
+    </MudPaper>
     
     <div class="mt-4 d-flex justify-end">
         <MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="Cancel" Class="mr-2">Cancel</MudButton>
         <MudButton Variant="Variant.Outlined" Color="Color.Success" OnClick="ExportJson" Class="mr-2">Export JSON</MudButton>
         <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveConversation">Save Conversation</MudButton>
     </div>
-
+    }
 </MudContainer>
 
-<!-- Add Person Dialog -->
 <!-- Add Person Dialog -->
 <MudOverlay @bind-Visible="_isAddPersonOpen" DarkBackground="true" AutoClose="false" ZIndex="9999">
     <MudPaper Class="pa-4" Width="300px">
@@ -187,14 +248,14 @@
     </MudPaper>
 </MudOverlay>
 
-
 @code {
     [Parameter] public Guid? Id { get; set; }
 
     private Conversation _conversation = new();
+    private bool _isLoading = true;
     private List<ActDictionaryDto> _dictionaries = new();
     private List<string> _identities = new();
-    private List<string> _behaviors = new(); // Cache behaviors
+    private List<string> _behaviors = new();
 
     // Person Dialog
     private bool _isAddPersonOpen;
@@ -207,26 +268,62 @@
     private Person _newEventObject;
     private string _newEventBehavior;
 
+    // File Upload
+    private IBrowserFile _uploadedFile;
+    private UploadedFile _attachedFile;
+    private bool _isUploading;
+
+    // Deflection Graph
+    private int _chartIndex = -1;
+    private List<ChartSeries> _series = new();
+    private string[] _xAxisLabels = { };
+    private ChartOptions _chartOptions = new() { YAxisLines = true, ChartPalette = new[] { "#594AE2", "#00C853", "#FFAB00", "#FF1744" } };
+    // Colors: Primary (Purple), Green (Likely), Amber (Wait?), Red (Unlikely)
+    
+    // Visualization Blocks
+    private class SituationBlock
+    {
+        public string Name { get; set; }
+        public string Color { get; set; }
+        public double X { get; set; }
+        public double Width { get; set; }
+    }
+    private List<SituationBlock> _situationBlocks = new();
+
     protected override async Task OnInitializedAsync()
     {
-        _dictionaries = await ActService.GetDictionariesAsync();
-
-        if (Id.HasValue && Id.Value != Guid.Empty)
+        _isLoading = true;
+        try
         {
-            var existing = await ConversationService.GetByIdAsync(Id.Value);
-            if (existing != null)
+            _dictionaries = await ActService.GetDictionariesAsync();
+
+            if (Id.HasValue && Id.Value != Guid.Empty)
             {
-                _conversation = existing;
-                if (!string.IsNullOrEmpty(_conversation.DictionaryKey))
+                var existing = await ConversationService.GetByIdAsync(Id.Value);
+                if (existing != null)
                 {
-                    await LoadDictionaryData(_conversation.DictionaryKey);
+                    _conversation = existing;
+                    if (!string.IsNullOrEmpty(_conversation.DictionaryKey))
+                    {
+                        await LoadDictionaryData(_conversation.DictionaryKey);
+                    }
                 }
             }
+            else
+            {
+                 _conversation = new Conversation();
+            }
+
+            if (_conversation.AttachedFileId.HasValue)
+            {
+                _attachedFile = await FileRepository.GetByIdAsync(_conversation.AttachedFileId.Value);
+            }
+            
+            UpdateChart();
         }
-        else
+        finally
         {
-             // Draft mode
-             _conversation = new Conversation();
+            _isLoading = false;
         }
     }
 
@@ -235,61 +332,48 @@
         _identities = await ActService.GetDictionaryIdentitiesAsync(key);
         _behaviors = await ActService.GetDictionaryBehaviorsAsync(key);
     }
-
-    // ... (OpenAddPersonDialog)
-
+    
     private async Task OpenAddPersonDialog()
     {
-        Console.WriteLine("OpenAddPersonDialog called");
         if (string.IsNullOrEmpty(_conversation.DictionaryKey))
         {
-            Console.WriteLine("DictionaryKey is empty");
             Snackbar.Add("Please select a dictionary first.", Severity.Warning);
             return;
         }
 
         if (!_identities.Any())
         {
-            Console.WriteLine("Loading identities...");
             await LoadDictionaryData(_conversation.DictionaryKey);
-            Console.WriteLine($"Loaded {_identities.Count} identities");
         }
         
         _newPersonName = $"Person {_conversation.Persons.Count + 1}";
         _newPersonIdentity = "";
         _newPersonGender = "avg";
         _isAddPersonOpen = true;
-        Console.WriteLine("Dialog Open set to true");
-        StateHasChanged(); // Force update
+        StateHasChanged();
     }
 
     private async Task<IEnumerable<string>> SearchIdentities(string value, CancellationToken token)
     {
-        if (string.IsNullOrEmpty(value))
-            return _identities.Take(50);
+        if (string.IsNullOrEmpty(value)) return _identities.Take(50);
         return _identities.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)).Take(50);
     }
 
     private async Task<IEnumerable<string>> SearchBehaviors(string value, CancellationToken token)
     {
-         if (string.IsNullOrEmpty(value))
-            return _behaviors.Take(50);
+         if (string.IsNullOrEmpty(value)) return _behaviors.Take(50);
         return _behaviors.Where(x => x.Contains(value, StringComparison.InvariantCultureIgnoreCase)).Take(50);
     }
 
-
     private async Task AddPerson()
     {
-        if (string.IsNullOrWhiteSpace(_newPersonName) || string.IsNullOrWhiteSpace(_newPersonIdentity))
-            return;
+        if (string.IsNullOrWhiteSpace(_newPersonName) || string.IsNullOrWhiteSpace(_newPersonIdentity)) return;
 
         var p = new Person { Name = _newPersonName, Identity = _newPersonIdentity, Gender = _newPersonGender };
         
         if (Id.HasValue) 
         {
             await ConversationService.AddPersonAsync(_conversation.Id, p);
-             // Person added to DB list. We also update local list to show it.
-             // Note: AddPersonAsync checks duplication.
              if (!_conversation.Persons.Any(px => px.Name == p.Name))
              {
                  _conversation.Persons.Add(p);
@@ -309,13 +393,6 @@
         if (Id.HasValue)
         {
             var s = await ConversationService.AddSituationAsync(_conversation.Id, typeName);
-            // Service returns the situation object
-            // We need to add it locally or reload? 
-            // The service modifies the conversation object if it was the same reference, but here it's likely different scope?
-            // Actually ConversationService is Scoped, so 'GetById' probably returns a specific instance.
-            // But we stored '_conversation' in the component.
-            // Safe bet is to append locally.
-            // However, the ID of the new situation is important!
             _conversation.Situations.Add(s);
         }
         else
@@ -339,16 +416,12 @@
 
         try 
         {
-            // Calculate EPA
-            // Note: ActProcessingService expects Identity strings.
-            // Pass the Interaction object which has Persons with Identities.
             var result = await ActProcessingService.CalculateInteractionAsync(interaction);
             interaction.Result = result;
             
             if (Id.HasValue)
             {
                  await ConversationService.AddEventAsync(_conversation.Id, situation, interaction);
-                 // Need to find situation in local object and add event
                  var localSit = _conversation.Situations.FirstOrDefault(s => s.Id == situation.Id);
                  if (localSit != null) localSit.Events.Add(interaction);
             }
@@ -357,9 +430,8 @@
                  situation.Events.Add(interaction);
             }
             
-            // Clear form
             _newEventBehavior = "";
-            // Keep actors/objects selected? Maybe clear.
+            UpdateChart();
         }
         catch (Exception ex)
         {
@@ -369,9 +441,8 @@
 
     private async Task SaveConversation()
     {
-        if (!Id.HasValue) // New
+        if (!Id.HasValue)
         {
-             // Create real one
              var created = await ConversationService.CreateAsync(_conversation.Name, _conversation.DictionaryKey);
              created.Persons = _conversation.Persons;
              created.Situations = _conversation.Situations;
@@ -400,5 +471,118 @@
         using var stream = new System.IO.MemoryStream(bytes);
         using var streamRef = new DotNetStreamReference(stream);
         await JS.InvokeVoidAsync("window.downloadFileFromStream", $"conversation-{_conversation.Name.Replace(" ", "_")}.json", streamRef);
+    }
+
+    private async Task UploadFiles(IBrowserFile file)
+    {
+        _uploadedFile = file;
+        _isUploading = true;
+        try
+        {
+            var fileName = file.Name;
+            var contentType = file.ContentType;
+            var size = file.Size;
+            
+            if (size > 10 * 1024 * 1024) 
+            {
+                Snackbar.Add("File too large (max 10MB)", Severity.Error);
+                return;
+            }
+
+            using var stream = file.OpenReadStream(10 * 1024 * 1024);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            ms.Position = 0;
+
+            var key = $"{Guid.NewGuid()}-{fileName}";
+            var bucket = Environment.GetEnvironmentVariable("S3_BUCKET_NAME") ?? "batch-evaluation";
+
+            await S3Service.UploadFileAsync(ms, key, contentType);
+
+            var uploaded = new UploadedFile
+            {
+                FileName = fileName,
+                ContentType = contentType,
+                Size = size,
+                S3BucketName = bucket,
+                S3Key = key
+            };
+
+            await FileRepository.CreateAsync(uploaded);
+            _conversation.AttachedFileId = uploaded.Id;
+            _attachedFile = uploaded;
+            
+            Snackbar.Add("File uploaded successfully", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Upload failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isUploading = false;
+        }
+    }
+    
+    private async Task DownloadAttachedFile()
+    {
+        if (_attachedFile == null) return;
+    }
+
+    private void UpdateChart()
+    {
+        var data = new List<double>();
+        var likelyLine = new List<double>();
+        var unlikelyLine = new List<double>();
+        var labels = new List<string>();
+        int eventCount = 0;
+        
+        _situationBlocks.Clear();
+        
+        int totalEvents = _conversation.Situations.Sum(s => s.Events.Where(e => e.Result != null).Count());
+        // Even if 0 events, we might want to show empty lines? No, requires data.
+        if (totalEvents == 0) return;
+        
+        double currentXPercent = 0;
+        string[] colors = { "#FFCDD2", "#C8E6C9", "#BBDEFB", "#FFF9C4", "#E1BEE7" };
+        int colorIdx = 0;
+
+        foreach (var sit in _conversation.Situations)
+        {
+            int countInSit = sit.Events.Where(e => e.Result != null).Count();
+            if (countInSit == 0) continue;
+            
+            double widthPercent = (double)countInSit / totalEvents * 100.0;
+            
+            _situationBlocks.Add(new SituationBlock
+            {
+                Name = sit.Type,
+                Color = colors[colorIdx % colors.Length],
+                X = currentXPercent,
+                Width = widthPercent
+            });
+            
+            currentXPercent += widthPercent;
+            colorIdx++;
+
+            foreach (var evt in sit.Events)
+            {
+                eventCount++;
+                if (evt.Result != null)
+                {
+                    data.Add(evt.Result.Deflection);
+                    likelyLine.Add(4.0);
+                    unlikelyLine.Add(8.0);
+                    labels.Add(eventCount.ToString());
+                }
+            }
+        }
+        
+        _series.Clear();
+        _series.Add(new ChartSeries { Name = "Deflection", Data = data.ToArray() });
+        _series.Add(new ChartSeries { Name = "Likely Threshold (< 4.0)", Data = likelyLine.ToArray() });
+        _series.Add(new ChartSeries { Name = "Unlikely Threshold (> 8.0)", Data = unlikelyLine.ToArray() });
+        
+        _xAxisLabels = labels.ToArray();
     }
 }

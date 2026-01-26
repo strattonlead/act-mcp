@@ -3,6 +3,8 @@
 @using ACT.Services
 @inject IConversationService ConversationService
 @inject NavigationManager NavManager
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
     <div class="d-flex justify-space-between align-center mb-4">
@@ -27,6 +29,8 @@
                         <MudCardActions>
                             <MudButton Variant="Variant.Text" Color="Color.Primary" Href="@($"/conversations/{conv.Id}")">Open</MudButton>
                             <MudButton Variant="Variant.Text" Color="Color.Secondary" OnClick="@(() => ExportJson(conv))">Export JSON</MudButton>
+                            <MudSpacer />
+                            <MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => DeleteConversation(conv))" aria-label="Delete" />
                         </MudCardActions>
                     </MudCard>
                 </MudItem>
@@ -49,6 +53,11 @@
 
     protected override async Task OnInitializedAsync()
     {
+        await LoadConversations();
+    }
+    
+    private async Task LoadConversations()
+    {
         _conversations = await ConversationService.GetAllAsync();
     }
 
@@ -66,5 +75,27 @@
         using var stream = new System.IO.MemoryStream(bytes);
         using var streamRef = new DotNetStreamReference(stream);
         await JS.InvokeVoidAsync("window.downloadFileFromStream", $"conversation-{conv.Name.Replace(" ", "_")}.json", streamRef);
+    }
+    
+    private async Task DeleteConversation(Conversation conv)
+    {
+        bool? result = await DialogService.ShowMessageBox(
+            "Delete Conversation", 
+            $"Are you sure you want to delete '{conv.Name}'? This action cannot be undone.", 
+            yesText: "Delete", cancelText: "Cancel");
+            
+        if (result == true)
+        {
+            try 
+            {
+                await ConversationService.DeleteAsync(conv.Id);
+                await LoadConversations();
+                Snackbar.Add("Conversation deleted.", Severity.Success);
+            }
+            catch (Exception ex)
+            {
+                Snackbar.Add($"Error removing conversation: {ex.Message}", Severity.Error);
+            }
+        }
     }
 }

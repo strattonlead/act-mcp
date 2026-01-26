@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -5,7 +6,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
 
 namespace ACT.Services;
 
@@ -14,66 +14,92 @@ public interface IActService
     Task<List<ActDictionaryDto>> GetDictionariesAsync(CancellationToken ct = default);
     Task<List<string>> GetDictionaryIdentitiesAsync(string key, CancellationToken ct = default);
     Task<List<string>> GetDictionaryBehaviorsAsync(string key, CancellationToken ct = default);
+    Task<List<ActSuggestionDto>> SuggestActionsAsync(string actor, string objectIdentity, string dictionaryKey = "germany2007", string gender = "male", CancellationToken ct = default);
 }
 
 public class ActService : IActService
 {
     private readonly IRScriptRunner _rRunner;
+    private readonly IActDataCache _cache;
     private readonly ILogger<ActService> _logger;
 
-    public ActService(IRScriptRunner rRunner, ILogger<ActService> logger)
+    public ActService(IRScriptRunner rRunner, IActDataCache cache, ILogger<ActService> logger)
     {
         _rRunner = rRunner;
+        _cache = cache;
         _logger = logger;
     }
 
     public async Task<List<ActDictionaryDto>> GetDictionariesAsync(CancellationToken ct = default)
     {
-        try
+        return await _cache.GetDictionariesAsync(async () =>
         {
-            var scriptPath = "Scripts/get_act_dictionaries.R";
-            // Check if we need to resolve it relative to base dir or if RScriptRunner handles it.
-            // RScriptRunner checks AppContext.BaseDirectory combined with script path.
-            // Since we copy "Scripts" folder to output, "Scripts/get_act_dictionaries.R" should work.
-            
-            var result = await _rRunner.RunJsonAsync<List<ActDictionaryDto>>(scriptPath, args: null, ct: ct);
-            return result.Payload ?? new List<ActDictionaryDto>();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to load ACT dictionaries.");
-            return new List<ActDictionaryDto>();
-        }
-        }
+            try
+            {
+                var scriptPath = "Scripts/get_act_dictionaries.R";
+                var result = await _rRunner.RunJsonAsync<List<ActDictionaryDto>>(scriptPath, args: null, ct: ct);
+                return result.Payload ?? new List<ActDictionaryDto>();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load ACT dictionaries.");
+                return new List<ActDictionaryDto>();
+            }
+        });
+    }
 
-        public async Task<List<string>> GetDictionaryIdentitiesAsync(string key, CancellationToken ct = default)
+    public async Task<List<string>> GetDictionaryIdentitiesAsync(string key, CancellationToken ct = default)
     {
-        try
+        return await _cache.GetIdentitiesAsync(key, async () =>
         {
-            var scriptPath = "Scripts/get_act_identities.R";
-            var result = await _rRunner.RunJsonAsync<List<string>>(scriptPath, args: new[] { key }, ct: ct);
-            return result.Payload ?? new List<string>();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to load identities for dictionary {Key}", key);
-            return new List<string>();
-        }
+            try
+            {
+                var scriptPath = "Scripts/get_act_identities.R";
+                var result = await _rRunner.RunJsonAsync<List<string>>(scriptPath, args: new[] { key }, ct: ct);
+                return result.Payload ?? new List<string>();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load identities for dictionary {Key}", key);
+                return new List<string>();
+            }
+        });
     }
 
     public async Task<List<string>> GetDictionaryBehaviorsAsync(string key, CancellationToken ct = default)
     {
-        try
+        return await _cache.GetBehaviorsAsync(key, async () =>
         {
-            var scriptPath = "Scripts/get_act_behaviors.R";
-            var result = await _rRunner.RunJsonAsync<List<string>>(scriptPath, args: new[] { key }, ct: ct);
-            return result.Payload ?? new List<string>();
-        }
-        catch (Exception ex)
+            try
+            {
+                var scriptPath = "Scripts/get_act_behaviors.R";
+                var result = await _rRunner.RunJsonAsync<List<string>>(scriptPath, args: new[] { key }, ct: ct);
+                return result.Payload ?? new List<string>();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load behaviors for dictionary {Key}", key);
+                return new List<string>();
+            }
+        });
+    }
+    public async Task<List<ActSuggestionDto>> SuggestActionsAsync(string actor, string objectIdentity, string dictionaryKey = "germany2007", string gender = "male", CancellationToken ct = default)
+    {
+        return await _cache.GetSuggestionsAsync($"{dictionaryKey}:{actor}:{objectIdentity}:{gender}", async () =>
         {
-            _logger.LogError(ex, "Failed to load behaviors for dictionary {Key}", key);
-            return new List<string>();
-        }
+            try
+            {
+                var scriptPath = "Scripts/suggest_actions.R";
+                var args = new[] { actor, objectIdentity, dictionaryKey, gender };
+                var result = await _rRunner.RunJsonAsync<List<ActSuggestionDto>>(scriptPath, args, ct: ct);
+                return result.Payload ?? new List<ActSuggestionDto>();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to suggest actions for {Actor} -> {Object}", actor, objectIdentity);
+                return new List<ActSuggestionDto>();
+            }
+        });
     }
 }
 
@@ -121,6 +147,8 @@ public class ActDictionaryDto
     [JsonIgnore]
     public List<string> GroupsList => JsonElementToStringList(Groups);
 
+
+
     private List<string> JsonElementToStringList(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Array)
@@ -133,4 +161,16 @@ public class ActDictionaryDto
         }
         return new List<string>();
     }
+}
+
+public class ActSuggestionDto
+{
+    [JsonPropertyName("term")]
+    public string Term { get; set; }
+
+    [JsonPropertyName("deflection")]
+    public double Deflection { get; set; }
+
+    [JsonPropertyName("epa")]
+    public List<double> Epa { get; set; }
 }

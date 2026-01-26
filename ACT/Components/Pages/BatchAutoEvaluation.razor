@@ -20,12 +20,24 @@
             <MudPaper Class="pa-4 mb-4">
                 <MudText Typo="Typo.h6" Class="mb-3">1. Configuration</MudText>
                 
-                <MudSelect T="string" Label="Dictionary" @bind-Value="_dictionaryKey" Variant="Variant.Outlined" Class="mb-4">
+                <MudSelect T="string" Label="Dictionary" Value="@_dictionaryKey" ValueChanged="OnDictionaryChanged" Variant="Variant.Outlined" Class="mb-4">
                     @foreach (var dict in _dictionaries)
                     {
                         <MudSelectItem Value="@dict.Key">@dict.Key</MudSelectItem>
                     }
                 </MudSelect>
+                
+                <MudCheckBox T="bool" @bind-Value="_forceIdentities" Label="Force Specific Identities?" Color="Color.Primary" Class="mb-2"/>
+                
+                @if (_forceIdentities)
+                {
+                     <MudSelect T="string" Label="All Identities" MultiSelection="true" @bind-SelectedValues="_selectedForcedIdentities" Variant="Variant.Outlined" Class="mb-4">
+                        @foreach (var identity in _availableIdentities)
+                        {
+                            <MudSelectItem Value="@identity">@identity</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
 
                 <MudFileUpload T="IReadOnlyList<IBrowserFile>" FilesChanged="UploadFiles" MaximumFileCount="10">
                     <ActivatorContent>
@@ -88,7 +100,7 @@
                             <MudButton Variant="Variant.Outlined" 
                                        Color="Color.Primary" 
                                        StartIcon="@Icons.Material.Filled.OpenInNew"
-                                       Href="@($"/conversation/{_selectedFile.ConversationId}")"
+                                       Href="@($"/conversations/{_selectedFile.ConversationId}")"
                                        Target="_blank">
                                 Open Full Conversation
                             </MudButton>
@@ -147,6 +159,9 @@
 @code {
     private List<ActDictionaryDto> _dictionaries = new();
     private string _dictionaryKey = "";
+    private bool _forceIdentities = false;
+    private IEnumerable<string> _selectedForcedIdentities = new HashSet<string>();
+    private List<string> _availableIdentities = new();
     private List<BatchFileStatus> _files => BatchService.GetFiles();
     private BatchFileStatus? _selectedFile;
 
@@ -159,10 +174,32 @@
         _dictionaries = await ActService.GetDictionariesAsync();
         if (_dictionaries.Any())
         {
-            _dictionaryKey = _dictionaries.First().Key;
+            var defaultKey = Environment.GetEnvironmentVariable("DEFAULT_DICTIONARY");
+            
+            // If env var is missing or invalid, try germany2007
+            if (string.IsNullOrEmpty(defaultKey) || !_dictionaries.Any(d => d.Key.Equals(defaultKey, StringComparison.OrdinalIgnoreCase)))
+            {
+                defaultKey = "germany2007";
+            }
+            
+            // If still invalid, fallback to first
+            if (!_dictionaries.Any(d => d.Key.Equals(defaultKey, StringComparison.OrdinalIgnoreCase)))
+            {
+                defaultKey = _dictionaries.First().Key;
+            }
+
+            await OnDictionaryChanged(defaultKey);
         }
         
         BatchService.OnChange += StateHasChanged;
+    }
+
+    private async Task OnDictionaryChanged(string newDict)
+    {
+        _dictionaryKey = newDict;
+        _availableIdentities = await ActService.GetDictionaryIdentitiesAsync(_dictionaryKey);
+        _selectedForcedIdentities = new HashSet<string>(); // Clear previous selection
+        StateHasChanged();
     }
 
     public void Dispose()
@@ -176,9 +213,7 @@
         // Auto select the first one if we have none selected
         if (_selectedFile == null && files.Any())
         {
-            _selectedFile = _files.Last(); // Select the latest added? Or first?
-            // Actually, let's select the first added one
-            if (_selectedFile == null) _selectedFile = _files.FirstOrDefault();
+             _selectedFile = _files.FirstOrDefault();
         }
     }
 
@@ -186,8 +221,15 @@
     {
         if (string.IsNullOrEmpty(_dictionaryKey)) return;
         
+        // Parse forced identities if enabled
+        List<string>? forcedList = null;
+        if (_forceIdentities && _selectedForcedIdentities.Any())
+        {
+            forcedList = _selectedForcedIdentities.ToList();
+        }
+
         // This runs in background
-        _ = BatchService.StartProcessingAsync(_dictionaryKey);
+        _ = BatchService.StartProcessingAsync(_dictionaryKey, forcedList);
         Snackbar.Add("Batch processing started!", Severity.Info);
     }
     

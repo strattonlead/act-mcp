@@ -10,20 +10,28 @@ public interface IConversationService
 {
     Task<List<Conversation>> GetAllAsync();
     Task<Conversation?> GetByIdAsync(Guid id);
+    Task<Conversation?> GetLatestBySessionIdAsync(string sessionId);
     Task<Conversation> CreateAsync(string name, string dictionaryKey);
     Task AddPersonAsync(Guid conversationId, Person person);
     Task<Situation> AddSituationAsync(Guid conversationId, string type);
     Task AddEventAsync(Guid conversationId, Situation situation, Interaction interaction);
     Task UpdateAsync(Conversation conversation);
+    Task DeleteAsync(Guid id);
 }
 
 public class ConversationService : IConversationService
 {
     private readonly IConversationRepository _repository;
+    private readonly IFileRepository _fileRepository;
+    private readonly IS3Service _s3Service;
+    private readonly IActProcessingService _actProcessingService;
 
-    public ConversationService(IConversationRepository repository)
+    public ConversationService(IConversationRepository repository, IFileRepository fileRepository, IS3Service s3Service, IActProcessingService actProcessingService)
     {
         _repository = repository;
+        _fileRepository = fileRepository;
+        _s3Service = s3Service;
+        _actProcessingService = actProcessingService;
     }
 
     public async Task<List<Conversation>> GetAllAsync()
@@ -34,6 +42,11 @@ public class ConversationService : IConversationService
     public async Task<Conversation?> GetByIdAsync(Guid id)
     {
         return await _repository.GetByIdAsync(id);
+    }
+
+    public async Task<Conversation?> GetLatestBySessionIdAsync(string sessionId)
+    {
+        return await _repository.GetLatestBySessionIdAsync(sessionId);
     }
 
     public async Task<Conversation> CreateAsync(string name, string dictionaryKey)
@@ -85,12 +98,47 @@ public class ConversationService : IConversationService
              throw new ArgumentException("Situation not found in conversation");
         }
 
+        if (interaction.Result == null)
+        {
+            interaction.Result = await _actProcessingService.CalculateInteractionAsync(interaction);
+        }
+
         targetSituation.Events.Add(interaction);
         await _repository.UpdateAsync(conv);
     }
 
     public async Task UpdateAsync(Conversation conversation)
     {
+        conversation.UpdatedAt = DateTime.UtcNow;
         await _repository.UpdateAsync(conversation);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var conversation = await _repository.GetByIdAsync(id);
+        if (conversation != null) 
+        {
+            // Allow repository to handle cascading deletes if needed, but for files we do it here or in Repo?
+            // Service layer seems appropriate for coordinating Entity + File + S3 deletion.
+            
+            if (conversation.AttachedFileId.HasValue)
+            {
+                var file = await _fileRepository.GetByIdAsync(conversation.AttachedFileId.Value);
+                if (file != null)
+                {
+                    try 
+                    {
+                        await _s3Service.DeleteFileAsync(file.S3BucketName, file.S3Key);
+                    }
+                    catch 
+                    { 
+                        // Log warning: S3 deletion failed, but proceed with DB cleanup 
+                    }
+                    await _fileRepository.DeleteAsync(file.Id);
+                }
+            }
+
+            await _repository.DeleteAsync(id);
+        }
     }
 }

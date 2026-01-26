@@ -105,14 +105,23 @@ Example output:
         // Get unique speakers
         var uniqueSpeakers = messages.Select(m => m.Speaker).Distinct().ToList();
         
-        // Provide a subset of identities for context (top 100)
-        var identitySample = availableIdentities.Take(100).ToList();
-        
+        // Use hash set for fast validation (case insensitive)
+        var validIdentities = new HashSet<string>(availableIdentities, StringComparer.OrdinalIgnoreCase);
+
+        var isForced = availableIdentities.Count < 20; // Heuristic: if small list provided, assume forced/strict subset
+        var promptInstruction = isForced 
+            ? $"You MUST strictly map the speakers to these SPECIFIC identities: {string.Join(", ", availableIdentities)}"
+            : $"Available identities: {string.Join(", ", availableIdentities)}";
+
         var systemPrompt = $@"You are an expert in Affect Control Theory (ACT). 
 Your task is to map conversation participants to ACT identity terms from a cultural dictionary.
 
-Available identities include (sample): {string.Join(", ", identitySample)}
-(There are more identities available - choose the best match from common social roles)
+{promptInstruction}
+
+Important Rules:
+1. You MUST choose an identity strictly from the provided list.
+2. Do not invent new identities.
+3. If an exact match is not found, choose the closest semantic match from the list.
 
 Common mappings:
 - 'Bot', 'Assistant', 'AI', 'System' → 'assistant' or similar helper role
@@ -137,23 +146,52 @@ Choose identities that best represent the social role of each speaker in the con
             new ChatMessage(ChatRole.User, userContent)
         };
 
-        try
+        const int MaxRetries = 3;
+        for (int i = 0; i < MaxRetries; i++)
         {
-            var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
-            var jsonText = ExtractJson(response.Text ?? "[]");
-            
-            var labeled = JsonSerializer.Deserialize<List<LabeledSpeaker>>(jsonText, new JsonSerializerOptions 
-            { 
-                PropertyNameCaseInsensitive = true 
-            });
-            
-            return labeled ?? new List<LabeledSpeaker>();
+            try
+            {
+                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+                var responseText = response.Text ?? "[]";
+                var jsonText = ExtractJson(responseText);
+                
+                var labeled = JsonSerializer.Deserialize<List<LabeledSpeaker>>(jsonText, new JsonSerializerOptions 
+                { 
+                    PropertyNameCaseInsensitive = true 
+                }) ?? new List<LabeledSpeaker>();
+
+                // Validate identities
+                var invalidEntries = new List<string>();
+                foreach (var item in labeled)
+                {
+                    if (!validIdentities.Contains(item.Identity))
+                    {
+                        invalidEntries.Add($"Identity '{item.Identity}' for speaker '{item.OriginalLabel}' is NOT in the allowed list.");
+                    }
+                }
+
+                if (invalidEntries.Count == 0)
+                {
+                    return labeled;
+                }
+
+                // If invalid, prepare for retry
+                _logger.LogWarning("LLM returned invalid identities. Retrying ({RetryCount}/{MaxRetries}). Invalid: {Invalid}", i + 1, MaxRetries, string.Join(", ", invalidEntries));
+
+                // Add the previous erroneous response and the error message to history
+                chatMessages.Add(new ChatMessage(ChatRole.Assistant, responseText));
+                chatMessages.Add(new ChatMessage(ChatRole.User, 
+                    $"ERROR: The following identities are invalid: {string.Join("; ", invalidEntries)}. " +
+                    $"You MUST choose valid identities from the provided list. Please correct this. return the full JSON again."));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to label identities from LLM (Attempt {Retry}).", i + 1);
+                if (i == MaxRetries - 1) throw;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to label identities from LLM.");
-            throw;
-        }
+
+        throw new Exception("Failed to obtain valid identities after retries.");
     }
 
     public async Task<List<DetectedSituation>> DetectSituationsAsync(
@@ -165,8 +203,8 @@ Choose identities that best represent the social role of each speaker in the con
         // Build speaker mapping for context
         var speakerMap = speakers.ToDictionary(s => s.OriginalLabel, s => s.Identity);
         
-        // Provide behavior samples
-        var behaviorSample = availableBehaviors.Take(100).ToList();
+        // Validate set
+        var validBehaviors = new HashSet<string>(availableBehaviors, StringComparer.OrdinalIgnoreCase);
         
         var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
 Your task is to analyze a conversation and:
@@ -176,8 +214,12 @@ Your task is to analyze a conversation and:
 Speaker identity mapping:
 {string.Join("\n", speakers.Select(s => $"- {s.OriginalLabel} = {s.Identity}"))}
 
-Available behaviors include (sample): {string.Join(", ", behaviorSample)}
-(Choose behaviors that best describe the action - use common verbs if exact match not available)
+Available behaviors: {string.Join(", ", availableBehaviors)}
+
+Important Rules:
+1. You MUST choose a behavior strictly from the provided list.
+2. Do not invent new behaviors.
+3. If an exact match is not found, choose the closest semantic match from the list.
 
 Return a JSON array with this exact format (no other text):
 [
@@ -209,23 +251,58 @@ Guidelines:
             new ChatMessage(ChatRole.User, $"Analyze this conversation:\n\n{conversationText}")
         };
 
-        try
+        const int MaxRetries = 3;
+        for (int i = 0; i < MaxRetries; i++)
         {
-            var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
-            var jsonText = ExtractJson(response.Text ?? "[]");
-            
-            var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, new JsonSerializerOptions 
-            { 
-                PropertyNameCaseInsensitive = true 
-            });
-            
-            return situations ?? new List<DetectedSituation>();
+            try
+            {
+                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+                var responseText = response.Text ?? "[]";
+                var jsonText = ExtractJson(responseText);
+                
+                var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, new JsonSerializerOptions 
+                { 
+                    PropertyNameCaseInsensitive = true 
+                }) ?? new List<DetectedSituation>();
+                
+                // Validate behaviors
+                var invalidEntries = new List<string>();
+                foreach (var sit in situations)
+                {
+                    if (sit.Events != null)
+                    {
+                        foreach (var evt in sit.Events)
+                        {
+                            if (!validBehaviors.Contains(evt.Behavior))
+                            {
+                                invalidEntries.Add($"Behavior '{evt.Behavior}' in situation '{sit.Name}' is NOT in the allowed list.");
+                            }
+                        }
+                    }
+                }
+
+                if (invalidEntries.Count == 0)
+                {
+                    return situations;
+                }
+
+                // If invalid, prepare for retry
+                _logger.LogWarning("LLM returned invalid behaviors. Retrying ({RetryCount}/{MaxRetries}). Invalid: {Invalid}", i + 1, MaxRetries, string.Join(", ", invalidEntries));
+
+                chatMessages.Add(new ChatMessage(ChatRole.Assistant, responseText));
+                chatMessages.Add(new ChatMessage(ChatRole.User, 
+                    $"ERROR: The following behaviors are invalid: {string.Join("; ", invalidEntries)}. " +
+                    $"You MUST choose valid behaviors from the provided list. Please correct this."));
+
+            }
+            catch (Exception ex)
+            {
+                 _logger.LogError(ex, "Failed to detect situations from LLM (Attempt {Retry}).", i + 1);
+                 if (i == MaxRetries - 1) throw;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to detect situations from LLM.");
-            throw;
-        }
+
+        throw new Exception("Failed to obtain valid behaviors after retries.");
     }
 
     /// <summary>

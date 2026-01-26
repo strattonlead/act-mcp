@@ -12,13 +12,23 @@ namespace ACT.Tests;
 public class ConversationServiceTests
 {
     private readonly Mock<IConversationRepository> _mockRepo;
+    private readonly Mock<IFileRepository> _mockFileRepo;
+    private readonly Mock<IS3Service> _mockS3;
+    private readonly Mock<IActProcessingService> _mockProcessing;
     private readonly ConversationService _service;
 
     public ConversationServiceTests()
     {
         DotNetEnv.Env.TraversePath().Load();
         _mockRepo = new Mock<IConversationRepository>();
-        _service = new ConversationService(_mockRepo.Object);
+        _mockFileRepo = new Mock<IFileRepository>();
+        _mockS3 = new Mock<IS3Service>();
+        _mockProcessing = new Mock<IActProcessingService>();
+        _service = new ConversationService(_mockRepo.Object, _mockFileRepo.Object, _mockS3.Object, _mockProcessing.Object);
+        
+        // Setup default mock behavior
+        _mockProcessing.Setup(p => p.CalculateInteractionAsync(It.IsAny<Interaction>()))
+            .ReturnsAsync(new InteractionResult());
     }
 
     [Fact]

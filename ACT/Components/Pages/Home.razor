@@ -21,62 +21,75 @@
     <MudText><b>MCP Endpoint:</b> @_mcpUrl</MudText>
 </MudAlert>
 
-<MudStack Row="true" Class="mb-4">
-    <MudChip T="string" Color="@(_rAvailable ? Color.Success : Color.Error)" Icon="@(_rAvailable ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.Error)">
-        @(_rAvailable ? "R Runtime Available" : "R Runtime Missing")
-    </MudChip>
-    @if (_rAvailable)
-    {
-        <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.Info">Version: @_rVersion</MudChip>
-        @if (_dictionaries != null)
-        {
-            <MudChip T="string" Color="Color.Primary" Icon="@Icons.Material.Filled.LibraryBooks">Dictionaries: @_dictionaries.Count</MudChip>
-        }
-    }
-</MudStack>
-
-@if (_rAvailable && _packageStatuses != null)
+@if (_isLoading)
 {
-    <MudText Typo="Typo.h6" Class="mt-4">R Packages</MudText>
-    <MudStack Row="true" Class="mb-4" Wrap="Wrap.Wrap">
-        @foreach (var pkg in _packageStatuses)
+    <div class="d-flex justify-center my-8">
+        <MudStack AlignItems="AlignItems.Center">
+            <MudProgressCircular Color="Color.Primary" Indeterminate="true" />
+            <MudText>Loading values...</MudText>
+        </MudStack>
+    </div>
+}
+else
+{
+    <MudStack Row="true" Class="mb-4">
+        <MudChip T="string" Color="@(_rAvailable ? Color.Success : Color.Error)" Icon="@(_rAvailable ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.Error)">
+            @(_rAvailable ? "R Runtime Available" : "R Runtime Missing")
+        </MudChip>
+        @if (_rAvailable)
         {
-            <MudChip T="string" Color="@(pkg.IsInstalled ? Color.Success : Color.Error)" Icon="@(pkg.IsInstalled ? Icons.Material.Filled.Check : Icons.Material.Filled.Close)">
-                @pkg.PackageName
-            </MudChip>
+            <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.Info">Version: @_rVersion</MudChip>
+            @if (_dictionaries != null)
+            {
+                <MudChip T="string" Color="Color.Primary" Icon="@Icons.Material.Filled.LibraryBooks">Dictionaries: @_dictionaries.Count</MudChip>
+            }
         }
     </MudStack>
+
+    @if (_rAvailable && _packageStatuses != null)
+    {
+        <MudText Typo="Typo.h6" Class="mt-4">R Packages</MudText>
+        <MudStack Row="true" Class="mb-4" Wrap="Wrap.Wrap">
+            @foreach (var pkg in _packageStatuses)
+            {
+                <MudChip T="string" Color="@(pkg.IsInstalled ? Color.Success : Color.Error)" Icon="@(pkg.IsInstalled ? Icons.Material.Filled.Check : Icons.Material.Filled.Close)">
+                    @pkg.PackageName
+                </MudChip>
+            }
+        </MudStack>
+    }
+
+    <MudText Typo="Typo.h6" Class="mt-4">Statistics</MudText>
+    <MudGrid Class="mb-4">
+        <MudItem xs="12" sm="4">
+            <MudCard>
+                <MudCardContent>
+                    <MudText Typo="Typo.h5">Conversations</MudText>
+                    <MudText Typo="Typo.h3">@_conversationCount</MudText>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudCard>
+                <MudCardContent>
+                    <MudText Typo="Typo.h5">Situations</MudText>
+                    <MudText Typo="Typo.h3">@_situationCount</MudText>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudCard>
+                <MudCardContent>
+                    <MudText Typo="Typo.h5">Events</MudText>
+                    <MudText Typo="Typo.h3">@_eventCount</MudText>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+    </MudGrid>
 }
 
-<MudText Typo="Typo.h6" Class="mt-4">Statistics</MudText>
-<MudGrid Class="mb-4">
-    <MudItem xs="12" sm="4">
-        <MudCard>
-            <MudCardContent>
-                <MudText Typo="Typo.h5">Conversations</MudText>
-                <MudText Typo="Typo.h3">@_conversationCount</MudText>
-            </MudCardContent>
-        </MudCard>
-    </MudItem>
-    <MudItem xs="12" sm="4">
-        <MudCard>
-            <MudCardContent>
-                <MudText Typo="Typo.h5">Situations</MudText>
-                <MudText Typo="Typo.h3">@_situationCount</MudText>
-            </MudCardContent>
-        </MudCard>
-    </MudItem>
-    <MudItem xs="12" sm="4">
-        <MudCard>
-            <MudCardContent>
-                <MudText Typo="Typo.h5">Events</MudText>
-                <MudText Typo="Typo.h3">@_eventCount</MudText>
-            </MudCardContent>
-        </MudCard>
-    </MudItem>
-</MudGrid>
-
 @code {
+    private bool _isLoading = true;
     private bool _rAvailable;
     private string _rVersion = string.Empty;
     private List<(string PackageName, bool IsInstalled)> _packageStatuses;
@@ -87,19 +100,77 @@
     private int _eventCount;
     private string _mcpUrl;
 
-    protected override async Task OnInitializedAsync()
+    protected override void OnInitialized()
     {
-        _mcpUrl = NavManager.ToAbsoluteUri("mcp/sse").ToString();
-        (_rAvailable, _rVersion) = await RService.GetRInfoAsync();
-        if (_rAvailable)
+        var baseUrl = Environment.GetEnvironmentVariable("BASE_URL");
+        var useHttpsEnv = Environment.GetEnvironmentVariable("USE_HTTPS");
+        var useHttps = string.Equals(useHttpsEnv, "true", StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrEmpty(baseUrl))
         {
-            _packageStatuses = await RService.GetPackagesStatusAsync();
-            _dictionaries = await ActService.GetDictionariesAsync();
+            // Normalize base url
+            baseUrl = baseUrl.TrimEnd('/');
+            
+            // Handle protocol
+            var scheme = useHttps ? "https" : "http";
+            
+            // If baseUrl already contains scheme, respect it, but if useHttps is true, ensure it is https
+            if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                 // If protocol is already there, we might need to replace it if USE_HTTPS is forced?
+                 // Usually BASE_URL might just be the domain "example.com" or "api.example.com", or full url.
+                 // Let's assume if it has scheme, we trust it, unless USE_HTTPS forces upgrading http to https.
+                 if (useHttps && baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                 {
+                     baseUrl = "https" + baseUrl.Substring(4);
+                 }
+            }
+            else
+            {
+                // Prepend scheme
+                baseUrl = $"{scheme}://{baseUrl}";
+            }
+
+            _mcpUrl = $"{baseUrl}/mcp/sse";
         }
-        
-        var conversations = await ConversationService.GetAllAsync();
-        _conversationCount = conversations.Count;
-        _situationCount = conversations.Sum(c => c.Situations.Count);
-        _eventCount = conversations.SelectMany(c => c.Situations).Sum(s => s.Events.Count);
+        else
+        {
+            // Fallback to current context
+            _mcpUrl = NavManager.ToAbsoluteUri("mcp/sse").ToString();
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await LoadDataAsync();
+        }
+    }
+
+    private async Task LoadDataAsync()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            (_rAvailable, _rVersion) = await RService.GetRInfoAsync();
+            if (_rAvailable)
+            {
+                _packageStatuses = await RService.GetPackagesStatusAsync();
+                _dictionaries = await ActService.GetDictionariesAsync();
+            }
+            
+            var conversations = await ConversationService.GetAllAsync();
+            _conversationCount = conversations.Count;
+            _situationCount = conversations.Sum(c => c.Situations.Count);
+            _eventCount = conversations.SelectMany(c => c.Situations).Sum(s => s.Events.Count);
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
     }
 }

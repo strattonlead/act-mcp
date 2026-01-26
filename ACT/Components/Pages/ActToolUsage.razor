@@ -8,6 +8,7 @@
 <MudTable Items="_logs" Hover="true" Breakpoint="Breakpoint.Sm" LoadingProgressColor="Color.Info" Dense="true">
     <HeaderContent>
         <MudTh>Time</MudTh>
+        <MudTh>Session</MudTh>
         <MudTh>Tool</MudTh>
         <MudTh>Success</MudTh>
         <MudTh>Arguments</MudTh>
@@ -15,6 +16,11 @@
     </HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="Time">@context.Timestamp.ToString("HH:mm:ss")</MudTd>
+        <MudTd DataLabel="Session">
+             <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Text">
+                 @(string.IsNullOrEmpty(context.SessionId) ? "N/A" : context.SessionId)
+             </MudChip>
+        </MudTd>
         <MudTd DataLabel="Tool">@context.ToolName</MudTd>
         <MudTd DataLabel="Success">
             @if (context.IsSuccess)

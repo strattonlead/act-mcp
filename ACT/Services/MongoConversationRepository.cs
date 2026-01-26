@@ -25,13 +25,26 @@ public class MongoConversationRepository : IConversationRepository
         return await _collection.Find(c => c.Id == id).FirstOrDefaultAsync();
     }
 
-    public async Task CreateAsync(Conversation conversation)
+    public async Task<Conversation> CreateAsync(Conversation conversation)
     {
         await _collection.InsertOneAsync(conversation);
+        return conversation;
     }
 
     public async Task UpdateAsync(Conversation conversation)
     {
         await _collection.ReplaceOneAsync(c => c.Id == conversation.Id, conversation);
+    }
+
+    public async Task<Conversation?> GetLatestBySessionIdAsync(string sessionId)
+    {
+        return await _collection.Find(c => c.SessionId == sessionId)
+            .SortByDescending(c => c.CreatedAt)
+            .FirstOrDefaultAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        await _collection.DeleteOneAsync(c => c.Id == id);
     }
 }

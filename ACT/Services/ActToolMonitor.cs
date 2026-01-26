@@ -11,13 +11,14 @@ namespace ACT.Services
         string Result,
         bool IsSuccess,
         DateTime Timestamp,
+        string SessionId,
         string ErrorMessage = null
     );
 
     public interface IActToolMonitor
     {
         event Action OnExecution;
-        void RecordCall(string toolName, string arguments, string result, bool isSuccess, string errorMessage = null);
+        void RecordCall(string sessionId, string toolName, string arguments, string result, bool isSuccess, string errorMessage = null);
         IEnumerable<ToolExecutionLog> GetRecentLogs();
     }
 
@@ -28,7 +29,7 @@ namespace ACT.Services
 
         public event Action OnExecution;
 
-        public void RecordCall(string toolName, string arguments, string result, bool isSuccess, string errorMessage = null)
+        public void RecordCall(string sessionId, string toolName, string arguments, string result, bool isSuccess, string errorMessage = null)
         {
             var log = new ToolExecutionLog(
                 ToolName: toolName,
@@ -36,6 +37,7 @@ namespace ACT.Services
                 Result: result,
                 IsSuccess: isSuccess,
                 Timestamp: DateTime.Now,
+                SessionId: sessionId,
                 ErrorMessage: errorMessage
             );
 

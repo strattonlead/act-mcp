@@ -1,0 +1,142 @@
+@page "/mcp-live"
+@using ACT.Services
+@inject IActToolMonitor Monitor
+@inject IMcpSessionService SessionService
+@inject IDialogService DialogService
+@implements IDisposable
+
+<MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
+    <MudGrid>
+        <!-- Header / Stats -->
+        <MudItem xs="12">
+            <MudPaper Class="pa-4 d-flex justify-space-between align-center" Elevation="2">
+                <MudText Typo="Typo.h5">MCP Live Dashboard</MudText>
+                <div>
+                    <MudChip T="string" Size="Size.Medium" Color="Color.Primary">Active Sessions: @_activeSessions.Count()</MudChip>
+                    <MudChip T="string" Size="Size.Medium" Color="Color.Secondary">Total Logs: @_logs.Count()</MudChip>
+                </div>
+            </MudPaper>
+        </MudItem>
+
+        <!-- Sessions List -->
+        <MudItem xs="12" md="4">
+            <MudCard Elevation="2">
+                <MudCardHeader>
+                    <CardHeaderContent>
+                        <MudText Typo="Typo.h6">Active Sessions</MudText>
+                    </CardHeaderContent>
+                </MudCardHeader>
+                <MudCardContent>
+                    <MudList T="string" Clickable="true">
+                        @foreach (var session in _activeSessions)
+                        {
+                            <MudListItem>
+                                <div class="d-flex flex-column">
+                                    <MudText Typo="Typo.subtitle2">@session.SessionId</MudText>
+                                    <MudText Typo="Typo.caption">Last seen: @session.LastSeen.ToString("HH:mm:ss")</MudText>
+                                    <MudText Typo="Typo.caption">Requests: @session.RequestCount</MudText>
+                                    @if (!string.IsNullOrEmpty(session.ClientInfo))
+                                    {
+                                        <MudText Typo="Typo.caption" Color="Color.Info" Style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">@session.ClientInfo</MudText>
+                                    }
+                                </div>
+                            </MudListItem>
+                        }
+                        @if (!_activeSessions.Any())
+                        {
+                            <MudText Class="pa-2" Typo="Typo.body2" Color="Color.Default">No active sessions.</MudText>
+                        }
+                    </MudList>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+
+        <!-- Live Feed -->
+        <MudItem xs="12" md="8">
+            <MudCard Elevation="2">
+                <MudCardHeader>
+                     <CardHeaderContent>
+                        <MudText Typo="Typo.h6">Live Execution Feed</MudText>
+                     </CardHeaderContent>
+                </MudCardHeader>
+                <MudCardContent Style="max-height: 600px; overflow-y: auto;">
+                    @if (!_logs.Any())
+                    {
+                        <MudText Typo="Typo.body1" Align="Align.Center" Class="pa-8">Waiting for tool usage...</MudText>
+                    }
+                    else
+                    {
+                        <MudTimeline TimelinePosition="TimelinePosition.Start">
+                            @foreach (var log in _logs)
+                            {
+                                <MudTimelineItem Color="@(log.IsSuccess ? Color.Success : Color.Error)" Size="Size.Small">
+                                    <ItemContent>
+                                        <MudPaper Elevation="0" Class="pa-3 mb-2" Style="background-color: var(--mud-palette-background-grey);">
+                                            <div class="d-flex justify-space-between">
+                                                <MudText Typo="Typo.subtitle2">@log.ToolName</MudText>
+                                                <MudText Typo="Typo.caption">@log.Timestamp.ToString("HH:mm:ss")</MudText>
+                                            </div>
+                                            <MudText Typo="Typo.caption" Class="mb-1">Session: @log.SessionId</MudText>
+                                            
+                                            <MudDivider Class="my-1"/>
+                                            
+                                            <div class="d-flex gap-2 mt-2">
+                                                <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="@(() => ShowDetails(log.Arguments, "Arguments"))">Arguments</MudButton>
+                                                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" OnClick="@(() => ShowDetails(log.Result, "Result"))">Result</MudButton>
+                                                @if (!string.IsNullOrEmpty(log.ErrorMessage))
+                                                {
+                                                     <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Error" OnClick="@(() => ShowDetails(log.ErrorMessage, "Error"))">Error</MudButton>
+                                                }
+                                            </div>
+                                        </MudPaper>
+                                    </ItemContent>
+                                </MudTimelineItem>
+                            }
+                        </MudTimeline>
+                    }
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+    </MudGrid>
+</MudContainer>
+
+@code {
+    private IEnumerable<ToolExecutionLog> _logs = new List<ToolExecutionLog>();
+    private IEnumerable<McpSessionInfo> _activeSessions = new List<McpSessionInfo>();
+    private System.Threading.Timer _timer;
+
+    protected override void OnInitialized()
+    {
+        Monitor.OnExecution += UpdateData;
+        _timer = new System.Threading.Timer(RefreshSessions, null, 0, 2000); // 2s refresh for sessions
+        UpdateData();
+    }
+
+    private void UpdateData()
+    {
+        _logs = Monitor.GetRecentLogs();
+        RefreshSessions(null);
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void RefreshSessions(object state)
+    {
+        _activeSessions = SessionService.GetActiveSessions();
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Monitor.OnExecution -= UpdateData;
+        _timer?.Dispose();
+    }
+
+    private void ShowDetails(string content, string title)
+    {
+        var parameters = new DialogParameters();
+        parameters.Add("Content", content);
+        
+        var options = new DialogOptions { CloseButton = true, MaxWidth = MaxWidth.Medium, FullWidth = true };
+        DialogService.Show<DialogDetails>(title, parameters, options);
+    }
+}

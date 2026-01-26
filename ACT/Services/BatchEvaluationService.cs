@@ -13,7 +13,7 @@ public interface IBatchEvaluationService
 {
     List<BatchFileStatus> GetFiles();
     Task AddFilesAsync(IReadOnlyList<IBrowserFile> files);
-    Task StartProcessingAsync(string dictionaryKey);
+    Task StartProcessingAsync(string dictionaryKey, List<string>? forcedIdentities = null);
     event Action? OnChange;
 }
 
@@ -92,7 +92,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         }
     }
 
-    public async Task StartProcessingAsync(string dictionaryKey)
+    public async Task StartProcessingAsync(string dictionaryKey, List<string>? forcedIdentities = null)
     {
         // Get Dictionary Data first
         List<string> identities = new();
@@ -119,7 +119,18 @@ public class BatchEvaluationService : IBatchEvaluationService
             
             try
             {
-                await ProcessFileAsync(fileStatus, stream, dictionaryKey, identities, behaviors);
+                // If forcedIdentities provided, explicitly use them. 
+                // They should be validated against dictionary if strict, but per requirements "user can define ... only these".
+                // We will pass the forced list as the available list to the Agent.
+                // However, we should also probably validate they exist in the dictionary? 
+                // Creating a hybrid list or just passing forced? 
+                // Plan said: "Set availableIdentities to ONLY this list".
+                
+                var targetIdentities = (forcedIdentities != null && forcedIdentities.Any()) 
+                    ? forcedIdentities 
+                    : identities;
+
+                await ProcessFileAsync(fileStatus, stream, dictionaryKey, targetIdentities, behaviors);
             }
             catch (Exception ex)
             {

@@ -14,6 +14,7 @@ namespace ACT.Tests;
 public class ActServiceTests
 {
     private readonly Mock<IRScriptRunner> _mockRunner;
+    private readonly Mock<IActDataCache> _mockCache;
     private readonly ActService _service;
 
     public ActServiceTests()
@@ -23,7 +24,19 @@ public class ActServiceTests
         DotNetEnv.Env.TraversePath().Load();
 
         _mockRunner = new Mock<IRScriptRunner>();
-        _service = new ActService(_mockRunner.Object, NullLogger<ActService>.Instance);
+        _mockCache = new Mock<IActDataCache>();
+
+        // Setup default passthrough behavior for the mock cache
+        _mockCache.Setup(c => c.GetDictionariesAsync(It.IsAny<Func<Task<List<ActDictionaryDto>>>>()))
+            .Returns<Func<Task<List<ActDictionaryDto>>>>(f => f());
+        
+        _mockCache.Setup(c => c.GetIdentitiesAsync(It.IsAny<string>(), It.IsAny<Func<Task<List<string>>>>()))
+            .Returns<string, Func<Task<List<string>>>>((k, f) => f());
+
+        _mockCache.Setup(c => c.GetBehaviorsAsync(It.IsAny<string>(), It.IsAny<Func<Task<List<string>>>>()))
+            .Returns<string, Func<Task<List<string>>>>((k, f) => f());
+
+        _service = new ActService(_mockRunner.Object, _mockCache.Object, NullLogger<ActService>.Instance);
     }
 
     [Fact]

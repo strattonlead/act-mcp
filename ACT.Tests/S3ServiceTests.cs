@@ -53,4 +53,20 @@ public class S3ServiceTests
         // Verify PutObject was called
         _mockMinio.Verify(m => m.PutObjectAsync(It.IsAny<PutObjectArgs>(), It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task DeleteFileAsync_ShouldRemoveObject()
+    {
+         // Arrange
+         _mockMinio.Setup(m => m.RemoveObjectAsync(
+             It.IsAny<RemoveObjectArgs>(),
+             It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+
+         // Act
+         await _service.DeleteFileAsync("test-bucket", "test.txt");
+
+         // Assert
+         _mockMinio.Verify(m => m.RemoveObjectAsync(It.IsAny<RemoveObjectArgs>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
 }
