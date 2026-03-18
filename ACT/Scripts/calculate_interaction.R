@@ -16,12 +16,30 @@ ensure_package("actdata", github_repo = "ahcombs/actdata")
 ensure_package("inteRact", github_repo = "ekmaloney/inteRact")
 ensure_package("jsonlite")
 
-# Get arguments: actor_term, behavior_term, object_term, gender
+# Get arguments: actor_term, behavior_term, object_term, gender,
+#   [optional] prev_actor_e, prev_actor_p, prev_actor_a, prev_object_e, prev_object_p, prev_object_a
+# When previous transient args are provided (for event chaining within a situation),
+# they replace the fundamental actor/object EPAs in the impression formation equation inputs.
+# Behavior always uses its fundamental EPA. Deflection is still computed against fundamentals.
 args <- commandArgs(trailingOnly = TRUE)
 actor_term <- if (length(args) >= 1) args[1] else "student"
 behavior_term <- if (length(args) >= 2) args[2] else "request_something_from"
 object_term <- if (length(args) >= 3) args[3] else "assistant"
-target_gender <- if (length(args) >= 4) args[4] else "male" 
+target_gender <- if (length(args) >= 4) args[4] else "male"
+
+# Optional: previous transient EPAs for chaining events within a situation
+has_prev_transients <- (length(args) >= 10)
+prev_actor_trans <- NULL
+prev_object_trans <- NULL
+if (has_prev_transients) {
+    prev_actor_trans <- as.numeric(c(args[5], args[6], args[7]))
+    prev_object_trans <- as.numeric(c(args[8], args[9], args[10]))
+    if (any(is.na(prev_actor_trans)) || any(is.na(prev_object_trans))) {
+        has_prev_transients <- FALSE
+        prev_actor_trans <- NULL
+        prev_object_trans <- NULL
+    }
+}
 
 dictionary_key <- "germany2007"
 
@@ -85,7 +103,11 @@ if (!is.null(ae) && !is.null(be) && !is.null(oe)) {
         
         if (is.null(coeffs)) stop("Could not load coefficients.")
 
-        inputs <- c(ae, be, oe)
+        # For event chaining: use previous transients as inputs if provided,
+        # otherwise use fundamentals. Behavior always uses fundamental EPA.
+        input_ae <- if (has_prev_transients) prev_actor_trans else ae
+        input_oe <- if (has_prev_transients) prev_object_trans else oe
+        inputs <- c(input_ae, be, input_oe)
         z_terms <- coeffs[, 1]
         design_row <- numeric(length(z_terms))
         
@@ -117,7 +139,7 @@ if (!is.null(ae) && !is.null(be) && !is.null(oe)) {
         
         total_deflection <- sq_diff_a + sq_diff_b + sq_diff_o
         
-        result$deflection <- sqrt(total_deflection)
+        result$deflection <- total_deflection
         result$transient_actor <- t_ae 
         result$transient_behavior <- t_be
         result$transient_object <- t_oe

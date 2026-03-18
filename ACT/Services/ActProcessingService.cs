@@ -1,5 +1,7 @@
 using ACT.Models;
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -18,25 +20,44 @@ public class ActProcessingService : IActProcessingService
         _logger = logger;
     }
 
-    public async Task<InteractionResult> CalculateInteractionAsync(Interaction interaction)
+    public Task<InteractionResult> CalculateInteractionAsync(Interaction interaction)
     {
-        // Path to script
-        // Assuming typical layout
+        return CalculateInteractionAsync(interaction, previousResult: null);
+    }
+
+    public async Task<InteractionResult> CalculateInteractionAsync(Interaction interaction, InteractionResult? previousResult)
+    {
         var scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts/calculate_interaction.R");
-        if (!File.Exists(scriptPath)) 
+        if (!File.Exists(scriptPath))
         {
-             // Try searching relative to project root for dev time
-             // This is a bit hacky but works for now
              var devPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../ACT/Scripts/calculate_interaction.R"));
              if (File.Exists(devPath)) scriptPath = devPath;
         }
 
-        var args = new[] 
-        { 
-            interaction.Actor.Identity, 
-            interaction.Behavior, 
-            interaction.Object.Identity 
+        // Determine gender for EPA lookup: use actor's gender setting, default to "avg"
+        var gender = !string.IsNullOrEmpty(interaction.Actor.Gender) ? interaction.Actor.Gender : "avg";
+
+        var argsList = new List<string>
+        {
+            interaction.Actor.Identity,
+            interaction.Behavior,
+            interaction.Object.Identity,
+            gender
         };
+
+        // When chaining events within a situation, pass previous transient EPAs
+        // so the impression formation equations use them instead of fundamentals
+        if (previousResult != null)
+        {
+            argsList.Add(previousResult.TransientActorEPA[0].ToString(CultureInfo.InvariantCulture));
+            argsList.Add(previousResult.TransientActorEPA[1].ToString(CultureInfo.InvariantCulture));
+            argsList.Add(previousResult.TransientActorEPA[2].ToString(CultureInfo.InvariantCulture));
+            argsList.Add(previousResult.TransientObjectEPA[0].ToString(CultureInfo.InvariantCulture));
+            argsList.Add(previousResult.TransientObjectEPA[1].ToString(CultureInfo.InvariantCulture));
+            argsList.Add(previousResult.TransientObjectEPA[2].ToString(CultureInfo.InvariantCulture));
+        }
+
+        var args = argsList.ToArray();
 
         try
         {
@@ -59,9 +80,8 @@ public class ActProcessingService : IActProcessingService
 
             var res = new InteractionResult();
             res.Deflection = root.GetProperty("deflection").GetDouble();
-            
-            // Helpers to read array
-            double[] ReadArray(JsonElement el) 
+
+            double[] ReadArray(JsonElement el)
             {
                 return new double[] { el[0].GetDouble(), el[1].GetDouble(), el[2].GetDouble() };
             }
@@ -69,7 +89,7 @@ public class ActProcessingService : IActProcessingService
             res.TransientActorEPA = ReadArray(root.GetProperty("transient_actor"));
             res.TransientBehaviorEPA = ReadArray(root.GetProperty("transient_behavior"));
             res.TransientObjectEPA = ReadArray(root.GetProperty("transient_object"));
-            
+
             if (root.TryGetProperty("actor_emotion", out var ae)) res.ActorEmotionEPA = ReadArray(ae);
             if (root.TryGetProperty("object_emotion", out var oe)) res.ObjectEmotionEPA = ReadArray(oe);
 

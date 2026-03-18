@@ -239,11 +239,13 @@ public class BatchEvaluationService : IBatchEvaluationService
         foreach (var detSit in detectedSituations)
         {
             var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
-            // Optionally set description if Situation model supports it
+
+            // Track the previous event's result for transient chaining within this situation.
+            // Each situation starts fresh (null = use fundamentals for event 1).
+            InteractionResult? previousResult = null;
 
             foreach (var evt in detSit.Events)
             {
-                // Create Interaction
                 var actorSpeaker = speakerMap.GetValueOrDefault(evt.ActorSpeaker);
                 var objectSpeaker = speakerMap.GetValueOrDefault(evt.ObjectSpeaker);
 
@@ -266,13 +268,12 @@ public class BatchEvaluationService : IBatchEvaluationService
                         Behavior = evt.Behavior
                     };
 
-                    // Calculate EPA
                     try
                     {
-                        var result = await _actProcessingService.CalculateInteractionAsync(interaction);
+                        var result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
                         interaction.Result = result;
+                        previousResult = result;
 
-                        // Add to Conversation Structure
                         await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
                     }
                     catch (Exception iex)

@@ -132,7 +132,7 @@ calc_deflection <- function(be_vec) {
     sq_diff_b <- sum((be_vec - t_be)^2)
     sq_diff_o <- sum((oe - t_oe)^2)
     
-    return(sqrt(sq_diff_a + sq_diff_b + sq_diff_o))
+    return(sq_diff_a + sq_diff_b + sq_diff_o)
 }
 
 results <- list()

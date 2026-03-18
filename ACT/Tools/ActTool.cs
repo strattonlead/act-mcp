@@ -287,6 +287,11 @@ As you interact with the user, analyze the exchange and record ACT events.
             double totalDeflection = 0;
             int count = 0;
 
+            // Track previous result for transient chaining within the conversation.
+            // In a full implementation, events would be grouped by situation and each
+            // situation would reset the chain. Here we chain all events sequentially.
+            InteractionResult? previousResult = null;
+
             foreach (var line in lines)
             {
                 var parts = line.Split('|');
@@ -301,17 +306,16 @@ As you interact with the user, analyze the exchange and record ACT events.
 
                 try
                 {
-                    // Calculate
-                    // We need to create dummy Persons for the calculation service
                     var interaction = new Interaction
                     {
-                        Actor = new Person { Identity = evt.Actor }, // Assuming simple identity mapping
+                        Actor = new Person { Identity = evt.Actor },
                         Behavior = evt.Behavior,
                         Object = new Person { Identity = evt.Object }
                     };
-                    
-                    var result = await _processingService.CalculateInteractionAsync(interaction);
-                    
+
+                    // Pass previousResult for transient chaining (event N uses transients from event N-1)
+                    var result = await _processingService.CalculateInteractionAsync(interaction, previousResult);
+
                     evt.Deflection = result.Deflection;
                     evt.ActorEPA = result.TransientActorEPA;
                     evt.BehaviorEPA = result.TransientBehaviorEPA;
@@ -319,13 +323,14 @@ As you interact with the user, analyze the exchange and record ACT events.
 
                     totalDeflection += result.Deflection;
                     count++;
+                    previousResult = result;
                 }
                 catch (Exception ex)
                 {
                     evt.Error = ex.Message;
                     _logger.LogError(ex, "Failed to calculate ACT for event: {Line}", line);
                 }
-                
+
                 analysisResult.Events.Add(evt);
             }
 

@@ -111,7 +111,18 @@ public class ConversationService : IConversationService
 
         if (interaction.Result == null)
         {
-            interaction.Result = await _actProcessingService.CalculateInteractionAsync(interaction);
+            // For transient chaining: use the last event's result in this situation as input.
+            // This ensures event N uses transient outcomes from event N-1 (not fundamentals).
+            InteractionResult? previousResult = null;
+            if (targetSituation.Events.Count > 0)
+            {
+                var lastEvent = targetSituation.Events.LastOrDefault();
+                if (lastEvent?.Result != null)
+                {
+                    previousResult = lastEvent.Result;
+                }
+            }
+            interaction.Result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
         }
 
         targetSituation.Events.Add(interaction);

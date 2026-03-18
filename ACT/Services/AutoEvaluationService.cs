@@ -135,6 +135,10 @@ public class AutoEvaluationService : IAutoEvaluationService
             {
                 var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
 
+                // Track the previous event's result for transient chaining within this situation.
+                // Each situation starts fresh (null = use fundamentals for event 1).
+                InteractionResult? previousResult = null;
+
                 foreach (var evt in detSit.Events)
                 {
                     var actorSpeaker = speakerMap.GetValueOrDefault(evt.ActorSpeaker);
@@ -161,8 +165,9 @@ public class AutoEvaluationService : IAutoEvaluationService
 
                         try
                         {
-                            var result = await _actProcessingService.CalculateInteractionAsync(interaction);
+                            var result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
                             interaction.Result = result;
+                            previousResult = result;
                             await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
                         }
                         catch (Exception iex)
