@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ACT.Services;
@@ -114,27 +115,24 @@ public class BatchEvaluationService : IBatchEvaluationService
             return;
         }
 
-        // Process files one by one (or parallel with Semaphore)
-        // Sequential for now to be safe with LLM rate limits
-        foreach (var fileStatus in _fileStatusService.GetAll().Where(f => f.State == BatchFileState.Pending).ToList())
+        // Process files in parallel (up to MaxParallelFiles at a time)
+        const int MaxParallelFiles = 20;
+        var semaphore = new SemaphoreSlim(MaxParallelFiles);
+
+        var targetIdentities = (forcedIdentities != null && forcedIdentities.Any())
+            ? forcedIdentities
+            : identities;
+
+        var pendingFiles = _fileStatusService.GetAll()
+            .Where(f => f.State == BatchFileState.Pending && _pendingStreams.ContainsKey(f.Id))
+            .ToList();
+
+        var tasks = pendingFiles.Select(async fileStatus =>
         {
-            if (!_pendingStreams.ContainsKey(fileStatus.Id)) continue;
-
+            await semaphore.WaitAsync();
             var (stream, fileName, contentType) = _pendingStreams[fileStatus.Id];
-
             try
             {
-                // If forcedIdentities provided, explicitly use them. 
-                // They should be validated against dictionary if strict, but per requirements "user can define ... only these".
-                // We will pass the forced list as the available list to the Agent.
-                // However, we should also probably validate they exist in the dictionary? 
-                // Creating a hybrid list or just passing forced? 
-                // Plan said: "Set availableIdentities to ONLY this list".
-
-                var targetIdentities = (forcedIdentities != null && forcedIdentities.Any())
-                    ? forcedIdentities
-                    : identities;
-
                 await ProcessFileAsync(fileStatus, stream, dictionaryKey, targetIdentities, behaviors);
             }
             catch (Exception ex)
@@ -146,11 +144,13 @@ public class BatchEvaluationService : IBatchEvaluationService
             }
             finally
             {
-                // Cleanup stream
                 stream.Dispose();
                 _pendingStreams.Remove(fileStatus.Id);
+                semaphore.Release();
             }
-        }
+        });
+
+        await Task.WhenAll(tasks);
     }
 
     private async Task ProcessFileAsync(
