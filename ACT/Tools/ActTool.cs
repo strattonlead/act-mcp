@@ -279,7 +279,7 @@ As you interact with the user, analyze the exchange and record ACT events.
             try
             {
                 // 1. Extract events using LLM
-                var extractionResult = await _chatAgent.ExtractActEventsAsync(conversationText, ct);
+                var extractionResult = await _chatAgent.ExtractActEventsAsync(conversationText, availableBehaviors: null, ct: ct);
             
             // 2. Parse extraction result
             var lines = extractionResult.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);

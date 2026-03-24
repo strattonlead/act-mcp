@@ -23,15 +23,20 @@ public class ChatAgent : IChatAgent
         _logger = logger;
     }
 
-    public async Task<string> ExtractActEventsAsync(string conversationHistory, CancellationToken ct = default)
+    public async Task<string> ExtractActEventsAsync(string conversationHistory, List<string>? availableBehaviors = null, CancellationToken ct = default)
     {
+        var behaviorInstruction = availableBehaviors != null && availableBehaviors.Count > 0
+            ? "The Behavior MUST be chosen from this allowed list:\n" + string.Join("\n", availableBehaviors.Select(b => $"  - {b}")) +
+              "\nDo NOT invent behaviors. Use the EXACT term from the list."
+            : "The Behavior must be mapped to a valid ACT behavior (e.g., 'advise', 'ask', 'greet').";
+
         var messages = new List<ChatMessage>
         {
-            new ChatMessage(ChatRole.System, 
+            new ChatMessage(ChatRole.System,
                 "You are an expert in Affect Control Theory (ACT). Your task is to analyze a conversation and extract 'ACT events'. " +
                 "An ACT event consists of an Actor, a Behavior, and an Object. " +
                 "The Actor and Object must be mapped to valid identities (e.g., 'student', 'teacher', 'doctor'). " +
-                "The Behavior must be mapped to a valid ACT behavior (e.g., 'advise', 'ask', 'greet'). " +
+                behaviorInstruction + " " +
                 "For the provided conversation, extract a list of events in the format: Actor|Behavior|Object. " +
                 "Return ONLY the list of events, one per line. Do not include any other text."),
             new ChatMessage(ChatRole.User, conversationHistory)
@@ -206,6 +211,8 @@ Choose identities that best represent the social role of each speaker in the con
         // Validate set
         var validBehaviors = new HashSet<string>(availableBehaviors, StringComparer.OrdinalIgnoreCase);
         
+        var behaviorListFormatted = string.Join("\n", availableBehaviors.Select(b => $"  - {b}"));
+
         var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
 Your task is to analyze a conversation and:
 1. Divide it into logical situations (context shifts, topic changes)
@@ -214,12 +221,13 @@ Your task is to analyze a conversation and:
 Speaker identity mapping:
 {string.Join("\n", speakers.Select(s => $"- {s.OriginalLabel} = {s.Identity}"))}
 
-Available behaviors: {string.Join(", ", availableBehaviors)}
+ALLOWED BEHAVIORS (you MUST use one of these EXACTLY as written — no synonyms, no abbreviations, no invented terms):
+{behaviorListFormatted}
 
-Important Rules:
-1. You MUST choose a behavior strictly from the provided list.
-2. Do not invent new behaviors.
-3. If an exact match is not found, choose the closest semantic match from the list.
+CRITICAL Rules:
+1. You MUST choose a behavior EXACTLY from the allowed list above. Copy the term character-for-character.
+2. Many behaviors are multi-word phrases (e.g. ""offer something to"", ""agree with"", ""ask about""). Use the FULL phrase, not a shortened form.
+3. Do NOT invent new behaviors or use synonyms. If unsure, pick the closest match from the list above.
 
 Return a JSON array with this exact format (no other text):
 [
@@ -265,7 +273,25 @@ Guidelines:
                     PropertyNameCaseInsensitive = true 
                 }) ?? new List<DetectedSituation>();
                 
-                // Validate behaviors
+                // Fuzzy auto-correction: try to fix invalid behaviors before retrying
+                foreach (var sit in situations)
+                {
+                    if (sit.Events == null) continue;
+                    foreach (var evt in sit.Events)
+                    {
+                        if (!validBehaviors.Contains(evt.Behavior))
+                        {
+                            var corrected = TryFuzzyMatchBehavior(evt.Behavior, availableBehaviors);
+                            if (corrected != null)
+                            {
+                                _logger.LogInformation("Auto-corrected behavior '{Invalid}' → '{Corrected}'", evt.Behavior, corrected);
+                                evt.Behavior = corrected;
+                            }
+                        }
+                    }
+                }
+
+                // Validate behaviors after auto-correction
                 var invalidEntries = new List<string>();
                 foreach (var sit in situations)
                 {
@@ -286,13 +312,14 @@ Guidelines:
                     return situations;
                 }
 
-                // If invalid, prepare for retry
+                // If invalid, prepare for retry with the behavior list re-included
                 _logger.LogWarning("LLM returned invalid behaviors. Retrying ({RetryCount}/{MaxRetries}). Invalid: {Invalid}", i + 1, MaxRetries, string.Join(", ", invalidEntries));
 
                 chatMessages.Add(new ChatMessage(ChatRole.Assistant, responseText));
-                chatMessages.Add(new ChatMessage(ChatRole.User, 
-                    $"ERROR: The following behaviors are invalid: {string.Join("; ", invalidEntries)}. " +
-                    $"You MUST choose valid behaviors from the provided list. Please correct this."));
+                chatMessages.Add(new ChatMessage(ChatRole.User,
+                    $"ERROR: The following behaviors are invalid: {string.Join("; ", invalidEntries)}.\n\n" +
+                    $"Here is the complete list of allowed behaviors again. You MUST pick ONLY from this list:\n{behaviorListFormatted}\n\n" +
+                    $"Please return the corrected full JSON again."));
 
             }
             catch (Exception ex)
@@ -343,5 +370,38 @@ Guidelines:
         }
         
         return trimmed;
+    }
+
+    /// <summary>
+    /// Try to fuzzy-match an invalid behavior to a valid one.
+    /// Returns the corrected behavior if exactly one match is found, null otherwise.
+    /// </summary>
+    private string? TryFuzzyMatchBehavior(string invalidBehavior, List<string> validBehaviors)
+    {
+        var lower = invalidBehavior.Trim().ToLowerInvariant();
+
+        // 1. Try exact match with underscores replaced by spaces (or vice versa)
+        var withSpaces = lower.Replace("_", " ");
+        var withUnderscores = lower.Replace(" ", "_");
+        var exactAlt = validBehaviors.FirstOrDefault(b =>
+            b.Equals(withSpaces, StringComparison.OrdinalIgnoreCase) ||
+            b.Equals(withUnderscores, StringComparison.OrdinalIgnoreCase));
+        if (exactAlt != null) return exactAlt;
+
+        // 2. Try: valid behavior starts with the invalid term (e.g., "offer" → "offer something to")
+        var startsWithMatches = validBehaviors
+            .Where(b => b.StartsWith(lower, StringComparison.OrdinalIgnoreCase) ||
+                        b.StartsWith(lower + " ", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (startsWithMatches.Count == 1) return startsWithMatches[0];
+
+        // 3. Try: valid behavior contains the invalid term as a whole word
+        var containsMatches = validBehaviors
+            .Where(b => b.Split(' ', '_').Any(word => word.Equals(lower, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (containsMatches.Count == 1) return containsMatches[0];
+
+        // No unique match found
+        return null;
     }
 }

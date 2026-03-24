@@ -10,7 +10,7 @@ public interface IChatAgent
     /// <summary>
     /// Extract ACT events from a conversation history.
     /// </summary>
-    Task<string> ExtractActEventsAsync(string conversationHistory, CancellationToken ct = default);
+    Task<string> ExtractActEventsAsync(string conversationHistory, List<string>? availableBehaviors = null, CancellationToken ct = default);
     
     /// <summary>
     /// Parse raw conversation text into individual messages with speaker identification.
