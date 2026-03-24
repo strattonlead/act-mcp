@@ -34,8 +34,8 @@ public class ActProcessingService : IActProcessingService
              if (File.Exists(devPath)) scriptPath = devPath;
         }
 
-        // Determine gender for EPA lookup: use actor's gender setting, default to "avg"
-        var gender = !string.IsNullOrEmpty(interaction.Actor.Gender) ? interaction.Actor.Gender : "avg";
+        // Determine gender for EPA lookup: use actor's gender setting, default to "average"
+        var gender = !string.IsNullOrEmpty(interaction.Actor.Gender) ? interaction.Actor.Gender : "average";
 
         var argsList = new List<string>
         {

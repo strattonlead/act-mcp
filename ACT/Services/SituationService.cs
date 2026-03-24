@@ -6,7 +6,7 @@ namespace ACT.Services;
 public interface ISituationService
 {
     Situation CreateSituation(string type = "Empty");
-    void AddPerson(Situation situation, string name, string identity, string gender = "avg");
+    void AddPerson(Situation situation, string name, string identity, string gender = "average");
     Interaction CreateInteraction(Person actor, Person obj, string behavior);
 }
 
@@ -17,7 +17,7 @@ public class SituationService : ISituationService
         return new Situation { Type = type };
     }
 
-    public void AddPerson(Situation situation, string name, string identity, string gender = "avg")
+    public void AddPerson(Situation situation, string name, string identity, string gender = "average")
     {
         var person = new Person
         {

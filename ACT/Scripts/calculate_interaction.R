@@ -25,7 +25,7 @@ args <- commandArgs(trailingOnly = TRUE)
 actor_term <- if (length(args) >= 1) args[1] else "student"
 behavior_term <- if (length(args) >= 2) args[2] else "request_something_from"
 object_term <- if (length(args) >= 3) args[3] else "assistant"
-target_gender <- if (length(args) >= 4) args[4] else "male"
+target_gender <- if (length(args) >= 4) args[4] else "average"
 
 # Optional: previous transient EPAs for chaining events within a situation
 has_prev_transients <- (length(args) >= 10)

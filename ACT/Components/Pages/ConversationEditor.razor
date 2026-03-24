@@ -273,7 +273,7 @@
         <MudSelect T="string" Label="Gender" @bind-Value="_newPersonGender" Variant="Variant.Outlined" Class="mb-4">
             <MudSelectItem Value="@("male")">Male</MudSelectItem>
             <MudSelectItem Value="@("female")">Female</MudSelectItem>
-            <MudSelectItem Value="@("avg")">Average</MudSelectItem>
+            <MudSelectItem Value="@("average")">Average</MudSelectItem>
         </MudSelect>
         <div class="d-flex justify-end gap-2">
             <MudButton OnClick="@(() => _isAddPersonOpen = false)">Cancel</MudButton>
@@ -295,7 +295,7 @@
     private bool _isAddPersonOpen;
     private string _newPersonName;
     private string _newPersonIdentity;
-    private string _newPersonGender = "avg";
+    private string _newPersonGender = "average";
 
     // New Event Form
     private Person _newEventActor;
@@ -435,7 +435,7 @@
         
         _newPersonName = $"Person {_conversation.Persons.Count + 1}";
         _newPersonIdentity = "";
-        _newPersonGender = "avg";
+        _newPersonGender = "average";
         _isAddPersonOpen = true;
         StateHasChanged();
     }

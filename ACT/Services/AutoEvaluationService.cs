@@ -115,7 +115,7 @@ public class AutoEvaluationService : IAutoEvaluationService
                     {
                         Name = speaker.DisplayName,
                         Identity = speaker.Identity,
-                        Gender = "avg"
+                        Gender = "average"
                     });
                 }
             }
@@ -152,13 +152,13 @@ public class AutoEvaluationService : IAutoEvaluationService
                             {
                                 Name = actorSpeaker.DisplayName,
                                 Identity = actorSpeaker.Identity,
-                                Gender = "avg"
+                                Gender = "average"
                             },
                             Object = new Person
                             {
                                 Name = objectSpeaker.DisplayName,
                                 Identity = objectSpeaker.Identity,
-                                Gender = "avg"
+                                Gender = "average"
                             },
                             Behavior = evt.Behavior
                         };

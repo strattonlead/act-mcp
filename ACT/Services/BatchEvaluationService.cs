@@ -220,7 +220,7 @@ public class BatchEvaluationService : IBatchEvaluationService
             {
                 Name = speaker.DisplayName,
                 Identity = speaker.Identity,
-                Gender = "avg" // Default
+                Gender = "average" // Default
             });
         }
 
@@ -257,13 +257,13 @@ public class BatchEvaluationService : IBatchEvaluationService
                         {
                             Name = actorSpeaker.DisplayName,
                             Identity = actorSpeaker.Identity,
-                            Gender = "avg"
+                            Gender = "average"
                         },
                         Object = new Person
                         {
                             Name = objectSpeaker.DisplayName,
                             Identity = objectSpeaker.Identity,
-                            Gender = "avg"
+                            Gender = "average"
                         },
                         Behavior = evt.Behavior
                     };
