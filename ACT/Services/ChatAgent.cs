@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,6 +17,14 @@ public class ChatAgent : IChatAgent
 {
     private readonly IChatClient _chatClient;
     private readonly ILogger<ChatAgent> _logger;
+
+    /// <summary>Shared JSON options tolerant of common LLM quirks.</summary>
+    private static readonly JsonSerializerOptions LlmJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
 
     public ChatAgent(IChatClient chatClient, ILogger<ChatAgent> logger)
     {
@@ -86,12 +95,9 @@ Example output:
         try
         {
             var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
-            var jsonText = ExtractJson(response.Text ?? "[]");
-            
-            var parsed = JsonSerializer.Deserialize<List<ParsedMessage>>(jsonText, new JsonSerializerOptions 
-            { 
-                PropertyNameCaseInsensitive = true 
-            });
+            var jsonText = SanitizeLlmJson(ExtractJson(response.Text ?? "[]"));
+
+            var parsed = JsonSerializer.Deserialize<List<ParsedMessage>>(jsonText, LlmJsonOptions);
             
             return parsed ?? new List<ParsedMessage>();
         }
@@ -158,12 +164,9 @@ Choose identities that best represent the social role of each speaker in the con
             {
                 var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
                 var responseText = response.Text ?? "[]";
-                var jsonText = ExtractJson(responseText);
-                
-                var labeled = JsonSerializer.Deserialize<List<LabeledSpeaker>>(jsonText, new JsonSerializerOptions 
-                { 
-                    PropertyNameCaseInsensitive = true 
-                }) ?? new List<LabeledSpeaker>();
+                var jsonText = SanitizeLlmJson(ExtractJson(responseText));
+
+                var labeled = JsonSerializer.Deserialize<List<LabeledSpeaker>>(jsonText, LlmJsonOptions) ?? new List<LabeledSpeaker>();
 
                 // Validate identities
                 var invalidEntries = new List<string>();
@@ -266,12 +269,9 @@ Guidelines:
             {
                 var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
                 var responseText = response.Text ?? "[]";
-                var jsonText = ExtractJson(responseText);
-                
-                var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, new JsonSerializerOptions 
-                { 
-                    PropertyNameCaseInsensitive = true 
-                }) ?? new List<DetectedSituation>();
+                var jsonText = SanitizeLlmJson(ExtractJson(responseText));
+
+                var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, LlmJsonOptions) ?? new List<DetectedSituation>();
                 
                 // Fuzzy auto-correction: try to fix invalid behaviors before retrying
                 foreach (var sit in situations)
@@ -291,7 +291,36 @@ Guidelines:
                     }
                 }
 
-                // Validate behaviors after auto-correction
+                // Collect still-invalid behaviors for LLM correction
+                var stillInvalid = situations
+                    .Where(s => s.Events != null)
+                    .SelectMany(s => s.Events!)
+                    .Where(e => !validBehaviors.Contains(e.Behavior))
+                    .Select(e => e.Behavior)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                // LLM-based semantic correction for behaviors fuzzy matching couldn't fix
+                if (stillInvalid.Count > 0)
+                {
+                    var llmCorrectionMap = await TryLlmCorrectBehaviorsAsync(stillInvalid, availableBehaviors, ct);
+                    foreach (var sit in situations)
+                    {
+                        if (sit.Events == null) continue;
+                        foreach (var evt in sit.Events)
+                        {
+                            if (!validBehaviors.Contains(evt.Behavior) &&
+                                llmCorrectionMap.TryGetValue(evt.Behavior.ToLowerInvariant(), out var llmCorrected) &&
+                                validBehaviors.Contains(llmCorrected))
+                            {
+                                _logger.LogInformation("LLM-corrected behavior '{Invalid}' → '{Corrected}'", evt.Behavior, llmCorrected);
+                                evt.Behavior = llmCorrected;
+                            }
+                        }
+                    }
+                }
+
+                // Validate behaviors after all corrections
                 var invalidEntries = new List<string>();
                 foreach (var sit in situations)
                 {
@@ -312,7 +341,22 @@ Guidelines:
                     return situations;
                 }
 
-                // If invalid, prepare for retry with the behavior list re-included
+                // If this is the last retry, drop invalid events and return partial results
+                if (i == MaxRetries - 1)
+                {
+                    _logger.LogWarning("Exhausted retries. Dropping {Count} invalid events and returning partial results. Invalid: {Invalid}",
+                        invalidEntries.Count, string.Join(", ", invalidEntries));
+
+                    foreach (var sit in situations)
+                    {
+                        sit.Events = sit.Events?.Where(e => validBehaviors.Contains(e.Behavior)).ToList();
+                    }
+                    // Remove empty situations
+                    situations = situations.Where(s => s.Events != null && s.Events.Count > 0).ToList();
+                    return situations;
+                }
+
+                // Otherwise prepare for retry with the behavior list re-included
                 _logger.LogWarning("LLM returned invalid behaviors. Retrying ({RetryCount}/{MaxRetries}). Invalid: {Invalid}", i + 1, MaxRetries, string.Join(", ", invalidEntries));
 
                 chatMessages.Add(new ChatMessage(ChatRole.Assistant, responseText));
@@ -329,7 +373,8 @@ Guidelines:
             }
         }
 
-        throw new Exception("Failed to obtain valid behaviors after retries.");
+        // Should not be reached, but return empty as safety net
+        return new List<DetectedSituation>();
     }
 
     /// <summary>
@@ -374,7 +419,9 @@ Guidelines:
 
     /// <summary>
     /// Try to fuzzy-match an invalid behavior to a valid one.
-    /// Returns the corrected behavior if exactly one match is found, null otherwise.
+    /// Uses underscore/space normalization, prefix matching, word matching,
+    /// and Levenshtein distance as a final fallback.
+    /// When multiple matches exist, picks the shortest (most generic) behavior.
     /// </summary>
     private string? TryFuzzyMatchBehavior(string invalidBehavior, List<string> validBehaviors)
     {
@@ -388,20 +435,126 @@ Guidelines:
             b.Equals(withUnderscores, StringComparison.OrdinalIgnoreCase));
         if (exactAlt != null) return exactAlt;
 
-        // 2. Try: valid behavior starts with the invalid term (e.g., "offer" → "offer something to")
+        // 2. Try: valid behavior starts with the invalid term — pick shortest if multiple
         var startsWithMatches = validBehaviors
             .Where(b => b.StartsWith(lower, StringComparison.OrdinalIgnoreCase) ||
-                        b.StartsWith(lower + " ", StringComparison.OrdinalIgnoreCase))
+                        b.StartsWith(lower + " ", StringComparison.OrdinalIgnoreCase) ||
+                        b.StartsWith(lower + "_", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (startsWithMatches.Count == 1) return startsWithMatches[0];
+        if (startsWithMatches.Count > 1) return startsWithMatches.OrderBy(b => b.Length).First();
 
-        // 3. Try: valid behavior contains the invalid term as a whole word
+        // 3. Try: valid behavior contains the invalid term as a whole word — pick shortest if multiple
         var containsMatches = validBehaviors
             .Where(b => b.Split(' ', '_').Any(word => word.Equals(lower, StringComparison.OrdinalIgnoreCase)))
             .ToList();
         if (containsMatches.Count == 1) return containsMatches[0];
+        if (containsMatches.Count > 1) return containsMatches.OrderBy(b => b.Length).First();
 
-        // No unique match found
+        // 4. Levenshtein distance fallback (threshold ≤ 3 edits, only for terms ≥ 4 chars)
+        if (lower.Length >= 4)
+        {
+            var closest = validBehaviors
+                .Select(b => (behavior: b, distance: LevenshteinDistance(lower, b.ToLowerInvariant())))
+                .Where(x => x.distance <= 3)
+                .OrderBy(x => x.distance)
+                .ThenBy(x => x.behavior.Length)
+                .FirstOrDefault();
+            if (closest.behavior != null) return closest.behavior;
+        }
+
         return null;
+    }
+
+    /// <summary>
+    /// Use the LLM to semantically map invalid behaviors to valid ones.
+    /// Returns a dictionary of lowercase-invalid → valid behavior.
+    /// </summary>
+    private async Task<Dictionary<string, string>> TryLlmCorrectBehaviorsAsync(
+        List<string> invalidBehaviors,
+        List<string> validBehaviors,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var invalidList = string.Join(", ", invalidBehaviors.Select(b => $"\"{b}\""));
+            var validList = string.Join(", ", validBehaviors.Select(b => $"\"{b}\""));
+
+            var prompt = $@"Map each invalid ACT behavior to the single closest semantic match from the allowed list.
+
+Invalid behaviors: [{invalidList}]
+
+Allowed behaviors: [{validList}]
+
+Return ONLY a JSON object mapping each invalid behavior to a valid one. Example:
+{{""reassure"": ""comfort"", ""confirm"": ""agree_with""}}";
+
+            var messages = new List<ChatMessage>
+            {
+                new ChatMessage(ChatRole.System, "You map behavioral terms to their closest semantic equivalents. Return only valid JSON."),
+                new ChatMessage(ChatRole.User, prompt)
+            };
+
+            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            var jsonText = SanitizeLlmJson(response.Text ?? "{}");
+
+            // Extract JSON object
+            var objStart = jsonText.IndexOf('{');
+            var objEnd = jsonText.LastIndexOf('}');
+            if (objStart >= 0 && objEnd > objStart)
+            {
+                jsonText = jsonText.Substring(objStart, objEnd - objStart + 1);
+            }
+
+            var mapping = JsonSerializer.Deserialize<Dictionary<string, string>>(jsonText, LlmJsonOptions);
+            if (mapping != null)
+            {
+                foreach (var kvp in mapping)
+                {
+                    result[kvp.Key.ToLowerInvariant()] = kvp.Value;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "LLM behavior correction call failed — skipping.");
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Sanitize common LLM JSON quirks (trailing commas, etc.) before deserialization.
+    /// </summary>
+    private static string SanitizeLlmJson(string json)
+    {
+        // Remove trailing commas before ] or }
+        return Regex.Replace(json, @",\s*([}\]])", "$1");
+    }
+
+    /// <summary>
+    /// Compute the Levenshtein edit distance between two strings.
+    /// </summary>
+    private static int LevenshteinDistance(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a)) return b?.Length ?? 0;
+        if (string.IsNullOrEmpty(b)) return a.Length;
+
+        var prev = new int[b.Length + 1];
+        var curr = new int[b.Length + 1];
+
+        for (int j = 0; j <= b.Length; j++) prev[j] = j;
+
+        for (int i = 1; i <= a.Length; i++)
+        {
+            curr[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+            {
+                int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                curr[j] = Math.Min(Math.Min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            (prev, curr) = (curr, prev);
+        }
+        return prev[b.Length];
     }
 }
