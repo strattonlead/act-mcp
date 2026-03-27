@@ -30,16 +30,24 @@ get_epa <- function(term, component, gender="all") {
       if ("E" %in% names(res)) {
           return(as.numeric(c(res$E[1], res$P[1], res$A[1])))
       }
-      return(as.numeric(c(res[1,1], res[1,2], res[1,3]))) 
+      return(as.numeric(c(res[1,1], res[1,2], res[1,3])))
     }
   }, error = function(e) return(NULL))
   return(NULL)
 }
 
+# Helper to extract coefficients from equation object
+extract_coeffs <- function(eqs) {
+    if (is.null(eqs)) return(NULL)
+    if (is.data.frame(eqs)) {
+        if ("df" %in% names(eqs) && length(eqs$df) >= 1) return(eqs$df[[1]])
+        if (!("df" %in% names(eqs))) return(eqs)
+    }
+    return(NULL)
+}
+
 ae <- get_epa(actor_term, "identity", target_gender)
 oe <- get_epa(object_term, "identity", target_gender)
-
-result_list <- list()
 
 if (is.null(ae) || is.null(oe)) {
     cat(jsonlite::toJSON(list(error = "Could not find EPA for actor or object"), auto_unbox = TRUE))
@@ -50,7 +58,6 @@ if (is.null(ae) || is.null(oe)) {
 all_behaviors <- actdata::epa_subset(expr = ".*", exactmatch = FALSE, dataset = dictionary_key, component = "behavior", group = target_gender)
 
 if (is.null(all_behaviors) || nrow(all_behaviors) == 0) {
-    # Fallback to 'all' gender if specific gender empty
     all_behaviors <- actdata::epa_subset(expr = ".*", exactmatch = FALSE, dataset = dictionary_key, component = "behavior", group = "all")
 }
 
@@ -59,28 +66,22 @@ if (is.null(all_behaviors) || nrow(all_behaviors) == 0) {
      quit()
 }
 
-# 3. Load Equations
-eqs <- tryCatch({
-    actdata::get_eqn(dictionary_key, "impressionabo", target_gender)
-}, error = function(e) return(NULL))
-
-if (is.null(eqs)) {
-     eqs <- actdata::get_eqn(dictionary_key, "impressionabo", "all")
-}
-
+# 3. Load ABOS equations (preferred, matches Interact program) with ABO fallback
 coeffs <- NULL
-if (is.data.frame(eqs)) {
-     if ("df" %in% names(eqs) && length(eqs$df) >= 1) {
-         coeffs <- eqs$df[[1]]
-     } else {
-         if (!("df" %in% names(eqs))) coeffs <- eqs
-     }
+is_abos <- FALSE
+
+for (g in c(target_gender, "male", "female", "all", "average")) {
+    eqs <- tryCatch(actdata::get_eqn(dictionary_key, "impressionabos", g), error = function(e) NULL)
+    coeffs <- extract_coeffs(eqs)
+    if (!is.null(coeffs)) { is_abos <- TRUE; break }
 }
 
 if (is.null(coeffs)) {
-     # Fallback
-     eqs <- actdata::get_eqn(dictionary_key, "impressionabo", "all")
-     if (!is.null(eqs)) coeffs <- eqs$df[[1]]
+    for (g in c(target_gender, "all", "average")) {
+        eqs <- tryCatch(actdata::get_eqn(dictionary_key, "impressionabo", g), error = function(e) NULL)
+        coeffs <- extract_coeffs(eqs)
+        if (!is.null(coeffs)) break
+    }
 }
 
 if (is.null(coeffs)) {
@@ -88,74 +89,69 @@ if (is.null(coeffs)) {
     quit()
 }
 
-# Pre-process coefficients for speed
-# Standard Impression Equations usually have 9 dependent variables (Ae, Ap, Aa, Be, Bp, Ba, Oe, Op, Oa)
-# We want to form a matrix operation if possible, but iteration is safer for correctness first.
-
+z_terms <- as.character(coeffs[, 1])
 coeff_mat <- as.matrix(coeffs[, 2:ncol(coeffs)])
-z_terms <- coeffs[, 1]
+n_terms <- nrow(coeffs)
+n_out <- ncol(coeffs) - 1
 
-# Function to calculate deflection
+# Function to calculate deflection using ABOS or ABO equations
 calc_deflection <- function(be_vec) {
-    inputs <- c(ae, be_vec, oe)
-    
-    # Construct Design Row
-    # This part is the bottleneck if looped. 
-    # Can we optimize? 
-    # Most terms are like: 1, A_e, A_p, A_a, B_e, ... A_e*B_e ... 
-    # We will just implement the loop for now. R is fast enough for ~1000 items.
-    
-    design_row <- numeric(length(z_terms))
-    for (i in 1:length(z_terms)) {
-        z <- z_terms[i]
-        code <- substr(z, 2, nchar(z))
-        val <- 1
-        if (code != "000000000" && code != "000000") {
-            chars <- strsplit(code, "")[[1]]
-            # Optimization: We only need to multiply non-1s? No, logic is positional.
-            for (j in 1:length(chars)) {
-                if (chars[j] == "1") {
-                    if (j <= length(inputs)) val <- val * inputs[j]
-                }
-            }
-        }
-        design_row[i] <- val
+    if (is_abos) {
+        setting <- c(0, 0, 0)
+        inputs <- c(ae, be_vec, oe, setting)
+    } else {
+        inputs <- c(ae, be_vec, oe)
     }
-    
-    transients <- as.vector(design_row %*% coeff_mat)
-    
-    t_ae <- transients[1:3]
-    t_be <- transients[4:6]
-    t_oe <- transients[7:9]
-    
-    sq_diff_a <- sum((ae - t_ae)^2)
-    sq_diff_b <- sum((be_vec - t_be)^2)
-    sq_diff_o <- sum((oe - t_oe)^2)
-    
-    return(sq_diff_a + sq_diff_b + sq_diff_o)
+
+    # Build design row (matching Interact's MathModel.impressions())
+    t_arr <- numeric(n_terms)
+    t_arr[1] <- 1.0
+    for (slot in 0:(n_out/3 - 1)) {
+        for (epa in 0:2) {
+            idx <- 3*slot + epa + 2
+            if (idx <= n_terms) t_arr[idx] <- inputs[slot*3 + epa + 1]
+        }
+    }
+    for (i in (n_out + 2):n_terms) {
+        if (i > n_terms) break
+        code <- substr(z_terms[i], 2, nchar(z_terms[i]))
+        chars <- strsplit(code, "")[[1]]
+        val <- 1.0
+        for (col in 1:length(chars)) {
+            if (chars[col] == "1") val <- val * t_arr[col + 1]
+        }
+        t_arr[i] <- val
+    }
+
+    tau <- numeric(n_out)
+    for (col in 1:n_out) {
+        s <- 0
+        for (i in 1:n_terms) s <- s + t_arr[i] * coeff_mat[i, col]
+        tau[col] <- s
+    }
+
+    t_ae <- tau[1:3]; t_be <- tau[4:6]; t_oe <- tau[7:9]
+    defl <- sum((ae - t_ae)^2) + sum((be_vec - t_be)^2) + sum((oe - t_oe)^2)
+
+    if (is_abos && length(tau) >= 12) {
+        t_se <- tau[10:12]
+        defl <- defl + sum(t_se^2)  # setting fundamental = [0,0,0]
+    }
+
+    return(defl)
 }
 
 results <- list()
-count <- 0
-
-# Loop through behaviors
-# Ensure columns E, P, A exist
-if (!all(c("E", "P", "A") %in% names(all_behaviors))) {
-    # maybe unnamed? usually actdata returns data frame with E, P, A
-    # If not, try by index 2,3,4? (1 is term)
-    # actdata usually: term, E, P, A, ...
-}
 
 for (i in 1:nrow(all_behaviors)) {
     term <- all_behaviors$term[i]
-    # Check if term is valid
     if (is.na(term)) next
-    
+
     be_vec <- c(all_behaviors$E[i], all_behaviors$P[i], all_behaviors$A[i])
     if (any(is.na(be_vec))) next
-    
+
     def <- calc_deflection(be_vec)
-    
+
     results[[i]] <- list(
         term = term,
         deflection = def,
@@ -163,10 +159,8 @@ for (i in 1:nrow(all_behaviors)) {
     )
 }
 
-# Remove nulls
+# Remove nulls and sort by deflection
 results <- results[!sapply(results, is.null)]
-
-# Sort by deflection directly on the list
 if (length(results) > 0) {
     deflections <- sapply(results, function(x) x$deflection)
     results <- results[order(deflections)]

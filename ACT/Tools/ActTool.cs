@@ -287,10 +287,10 @@ As you interact with the user, analyze the exchange and record ACT events.
             double totalDeflection = 0;
             int count = 0;
 
-            // Track previous result for transient chaining within the conversation.
-            // In a full implementation, events would be grouped by situation and each
-            // situation would reset the chain. Here we chain all events sequentially.
-            InteractionResult? previousResult = null;
+            // Track transient EPAs by identity name for correct chaining.
+            // When actor/object roles swap between events, this ensures each identity
+            // gets the correct transient regardless of which slot it was in.
+            Dictionary<string, double[]>? transientsByIdentity = null;
 
             foreach (var line in lines)
             {
@@ -313,8 +313,7 @@ As you interact with the user, analyze the exchange and record ACT events.
                         Object = new Person { Identity = evt.Object }
                     };
 
-                    // Pass previousResult for transient chaining (event N uses transients from event N-1)
-                    var result = await _processingService.CalculateInteractionAsync(interaction, previousResult);
+                    var result = await _processingService.CalculateInteractionAsync(interaction, transientsByIdentity);
 
                     evt.Deflection = result.Deflection;
                     evt.ActorEPA = result.TransientActorEPA;
@@ -323,7 +322,13 @@ As you interact with the user, analyze the exchange and record ACT events.
 
                     totalDeflection += result.Deflection;
                     count++;
-                    previousResult = result;
+
+                    // Update transient map: store each identity's transient by its name
+                    transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [interaction.Actor.Identity] = result.TransientActorEPA,
+                        [interaction.Object.Identity] = result.TransientObjectEPA
+                    };
                 }
                 catch (Exception ex)
                 {

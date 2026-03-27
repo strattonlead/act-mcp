@@ -240,9 +240,11 @@ public class BatchEvaluationService : IBatchEvaluationService
         {
             var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
 
-            // Track the previous event's result for transient chaining within this situation.
+            // Track transient EPAs by identity name for correct chaining.
+            // When actor/object roles swap between events, this ensures each identity
+            // gets the correct transient regardless of which slot (actor vs object) it was in.
             // Each situation starts fresh (null = use fundamentals for event 1).
-            InteractionResult? previousResult = null;
+            Dictionary<string, double[]>? transientsByIdentity = null;
 
             foreach (var evt in detSit.Events)
             {
@@ -270,9 +272,15 @@ public class BatchEvaluationService : IBatchEvaluationService
 
                     try
                     {
-                        var result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
+                        var result = await _actProcessingService.CalculateInteractionAsync(interaction, transientsByIdentity);
                         interaction.Result = result;
-                        previousResult = result;
+
+                        // Update transient map: store each identity's transient by its name
+                        transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            [interaction.Actor.Identity] = result.TransientActorEPA,
+                            [interaction.Object.Identity] = result.TransientObjectEPA
+                        };
 
                         await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
                     }

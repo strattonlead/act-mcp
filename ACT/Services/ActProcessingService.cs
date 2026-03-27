@@ -22,10 +22,10 @@ public class ActProcessingService : IActProcessingService
 
     public Task<InteractionResult> CalculateInteractionAsync(Interaction interaction)
     {
-        return CalculateInteractionAsync(interaction, previousResult: null);
+        return CalculateInteractionAsync(interaction, transientsByIdentity: null);
     }
 
-    public async Task<InteractionResult> CalculateInteractionAsync(Interaction interaction, InteractionResult? previousResult)
+    public async Task<InteractionResult> CalculateInteractionAsync(Interaction interaction, Dictionary<string, double[]>? transientsByIdentity)
     {
         var scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts/calculate_interaction.R");
         if (!File.Exists(scriptPath))
@@ -45,16 +45,27 @@ public class ActProcessingService : IActProcessingService
             gender
         };
 
-        // When chaining events within a situation, pass previous transient EPAs
-        // so the impression formation equations use them instead of fundamentals
-        if (previousResult != null)
+        // When chaining events within a situation, look up previous transient EPAs
+        // by identity name. This correctly handles actor/object role swaps between events.
+        // E.g., if E1 was student→assistant and E2 is assistant→student,
+        // E2's actor input (assistant) uses E1's *object* transient, not E1's actor transient.
+        if (transientsByIdentity != null)
         {
-            argsList.Add(previousResult.TransientActorEPA[0].ToString(CultureInfo.InvariantCulture));
-            argsList.Add(previousResult.TransientActorEPA[1].ToString(CultureInfo.InvariantCulture));
-            argsList.Add(previousResult.TransientActorEPA[2].ToString(CultureInfo.InvariantCulture));
-            argsList.Add(previousResult.TransientObjectEPA[0].ToString(CultureInfo.InvariantCulture));
-            argsList.Add(previousResult.TransientObjectEPA[1].ToString(CultureInfo.InvariantCulture));
-            argsList.Add(previousResult.TransientObjectEPA[2].ToString(CultureInfo.InvariantCulture));
+            var actorIdentity = interaction.Actor.Identity;
+            var objectIdentity = interaction.Object.Identity;
+
+            if (transientsByIdentity.TryGetValue(actorIdentity, out var actorTrans) &&
+                transientsByIdentity.TryGetValue(objectIdentity, out var objectTrans))
+            {
+                argsList.Add(actorTrans[0].ToString(CultureInfo.InvariantCulture));
+                argsList.Add(actorTrans[1].ToString(CultureInfo.InvariantCulture));
+                argsList.Add(actorTrans[2].ToString(CultureInfo.InvariantCulture));
+                argsList.Add(objectTrans[0].ToString(CultureInfo.InvariantCulture));
+                argsList.Add(objectTrans[1].ToString(CultureInfo.InvariantCulture));
+                argsList.Add(objectTrans[2].ToString(CultureInfo.InvariantCulture));
+            }
+            // If an identity is not found in the dictionary (e.g., new participant),
+            // fall back to fundamentals by not passing extra args.
         }
 
         var args = argsList.ToArray();

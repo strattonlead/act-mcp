@@ -51,10 +51,73 @@ get_epa <- function(term, component, gender="all") {
       if ("E" %in% names(res)) {
           return(as.numeric(c(res$E[1], res$P[1], res$A[1])))
       }
-      return(as.numeric(c(res[1,1], res[1,2], res[1,3]))) 
+      return(as.numeric(c(res[1,1], res[1,2], res[1,3])))
     }
   }, error = function(e) return(NULL))
   return(NULL)
+}
+
+# Helper to extract coefficients from equation object
+extract_coeffs <- function(eqs) {
+    if (is.null(eqs)) return(NULL)
+    if (is.data.frame(eqs)) {
+        if ("df" %in% names(eqs) && length(eqs$df) >= 1) return(eqs$df[[1]])
+        if (!("df" %in% names(eqs))) return(eqs)
+    }
+    return(NULL)
+}
+
+# Helper to compute transients from inputs using impression formation equations.
+# This mirrors the Interact Java program's MathModel.impressions() method exactly.
+# Works for both ABO (9-col) and ABOS (12-col) equations.
+compute_transients <- function(inputs, coeffs) {
+    z_terms <- as.character(coeffs[, 1])
+    n <- nrow(coeffs)
+    n_out <- ncol(coeffs) - 1  # 9 for ABO, 12 for ABOS
+
+    # Build design row matching Interact's algorithm:
+    # t[0] = 1.0 (constant)
+    # t[1..n_out] = input EPA values (main effects)
+    # t[n_out+1..n-1] = interaction terms (products of main effects)
+    t_arr <- numeric(n)
+    t_arr[1] <- 1.0
+
+    # Fill main effect slots
+    for (slot in 0:(n_out/3 - 1)) {
+        for (epa in 0:2) {
+            idx <- 3*slot + epa + 2  # +2: R 1-indexed, t[1]=constant
+            if (idx <= n) {
+                t_arr[idx] <- inputs[slot*3 + epa + 1]
+            }
+        }
+    }
+
+    # Fill interaction terms
+    for (i in (n_out + 2):n) {
+        if (i > n) break
+        code <- substr(z_terms[i], 2, nchar(z_terms[i]))
+        chars <- strsplit(code, "")[[1]]
+        val <- 1.0
+        for (col in 1:length(chars)) {
+            if (chars[col] == "1") {
+                val <- val * t_arr[col + 1]
+            }
+        }
+        t_arr[i] <- val
+    }
+
+    # Matrix multiplication: tau[col] = sum(t[i] * coef[i][col])
+    coeff_mat <- as.matrix(coeffs[, 2:ncol(coeffs)])
+    tau <- numeric(n_out)
+    for (col in 1:n_out) {
+        s <- 0
+        for (i in 1:n) {
+            s <- s + t_arr[i] * coeff_mat[i, col]
+        }
+        tau[col] <- s
+    }
+
+    return(tau)
 }
 
 ae <- get_epa(actor_term, "identity", target_gender)
@@ -74,101 +137,84 @@ result <- list(
 
 if (!is.null(ae) && !is.null(be) && !is.null(oe)) {
     tryCatch({
-        # Load equations
-        eqs <- tryCatch({
-            actdata::get_eqn(dictionary_key, "impressionabo", target_gender)
-        }, error = function(e) {
-            return(NULL)
-        })
-        
-        if (is.null(eqs)) {
-             eqs <- actdata::get_eqn(dictionary_key, "impressionabo", "all")
-        }
-        
-        # Extract coefficients
+        # Load ABOS equations (Actor-Behavior-Object-Setting) as the Interact program uses.
+        # The Interact Java program always uses ABOS equations internally, even without a setting.
+        # When no setting is selected, setting EPA = [0,0,0].
+        # Fall back to ABO equations if ABOS not available.
         coeffs <- NULL
-        if (is.data.frame(eqs)) {
-             if ("df" %in% names(eqs) && length(eqs$df) >= 1) {
-                 coeffs <- eqs$df[[1]]
-             } else {
-                 if (!("df" %in% names(eqs))) coeffs <- eqs
-             }
+        is_abos <- FALSE
+
+        # Try ABOS first (preferred - matches Interact program)
+        for (g in c(target_gender, "male", "female", "all", "average")) {
+            eqs <- tryCatch(actdata::get_eqn(dictionary_key, "impressionabos", g), error = function(e) NULL)
+            coeffs <- extract_coeffs(eqs)
+            if (!is.null(coeffs)) {
+                is_abos <- TRUE
+                break
+            }
         }
-        
+
+        # Fall back to ABO if ABOS not available
         if (is.null(coeffs)) {
-             # Fallback
-             eqs <- actdata::get_eqn(dictionary_key, "impressionabo", "all")
-             coeffs <- eqs$df[[1]]
+            for (g in c(target_gender, "all", "average")) {
+                eqs <- tryCatch(actdata::get_eqn(dictionary_key, "impressionabo", g), error = function(e) NULL)
+                coeffs <- extract_coeffs(eqs)
+                if (!is.null(coeffs)) break
+            }
         }
-        
-        if (is.null(coeffs)) stop("Could not load coefficients.")
+
+        if (is.null(coeffs)) stop("Could not load impression formation coefficients.")
 
         # For event chaining: use previous transients as inputs if provided,
         # otherwise use fundamentals. Behavior always uses fundamental EPA.
         input_ae <- if (has_prev_transients) prev_actor_trans else ae
         input_oe <- if (has_prev_transients) prev_object_trans else oe
-        inputs <- c(input_ae, be, input_oe)
-        z_terms <- coeffs[, 1]
-        design_row <- numeric(length(z_terms))
-        
-        for (i in 1:length(z_terms)) {
-            z <- z_terms[i]
-            code <- substr(z, 2, nchar(z))
-            val <- 1
-            if (code != "000000000" && code != "000000") {
-                chars <- strsplit(code, "")[[1]]
-                for (j in 1:length(chars)) {
-                    if (chars[j] == "1") {
-                        if (j <= length(inputs)) val <- val * inputs[j]
-                    }
-                }
-            }
-            design_row[i] <- val
+
+        # Build input vector - ABOS adds setting EPA [0,0,0] when no setting is selected
+        if (is_abos) {
+            setting <- c(0, 0, 0)
+            inputs <- c(input_ae, be, input_oe, setting)
+        } else {
+            inputs <- c(input_ae, be, input_oe)
         }
-        
-        coeff_mat <- as.matrix(coeffs[, 2:ncol(coeffs)])
-        transients <- as.vector(design_row %*% coeff_mat)
-        
-        t_ae <- transients[1:3]
-        t_be <- transients[4:6]
-        t_oe <- transients[7:9]
-        
+
+        # Compute transient impressions
+        tau <- compute_transients(inputs, coeffs)
+
+        t_ae <- tau[1:3]
+        t_be <- tau[4:6]
+        t_oe <- tau[7:9]
+
+        # Deflection = sum of squared differences between fundamentals and transient outcomes.
+        # For ABOS, this includes the setting component (fundamentals [0,0,0] vs setting transients).
         sq_diff_a <- sum((ae - t_ae)^2)
         sq_diff_b <- sum((be - t_be)^2)
         sq_diff_o <- sum((oe - t_oe)^2)
-        
         total_deflection <- sq_diff_a + sq_diff_b + sq_diff_o
-        
+
+        if (is_abos && length(tau) >= 12) {
+            t_se <- tau[10:12]
+            setting_fund <- c(0, 0, 0)
+            sq_diff_s <- sum((setting_fund - t_se)^2)
+            total_deflection <- total_deflection + sq_diff_s
+        }
+
         result$deflection <- total_deflection
-        result$transient_actor <- t_ae 
+        result$transient_actor <- t_ae
         result$transient_behavior <- t_be
         result$transient_object <- t_oe
-        
+
         # --- Actor Emotions ---
-        
-        emo_eqs <- tryCatch({
-            actdata::get_eqn(dictionary_key, "emotionid", target_gender)
-        }, error=function(e) NULL)
-        
+
         emo_coeffs <- NULL
-        if (!is.null(emo_eqs)) {
-             if ("df" %in% names(emo_eqs) && length(emo_eqs$df) >= 1) emo_coeffs <- emo_eqs$df[[1]]
-             else if (nrow(emo_eqs) > 0 && !("df" %in% names(emo_eqs))) emo_coeffs <- emo_eqs
+        for (g in c(target_gender, "all", "average")) {
+            emo_eqs <- tryCatch(actdata::get_eqn(dictionary_key, "emotionid", g), error = function(e) NULL)
+            emo_coeffs <- extract_coeffs(emo_eqs)
+            if (!is.null(emo_coeffs)) break
         }
-        
-        if (is.null(emo_coeffs)) {
-             emo_eqs <- tryCatch(actdata::get_eqn(dictionary_key, "emotionid", "all"), error=function(e) NULL)
-             if (!is.null(emo_eqs)) {
-                 if ("df" %in% names(emo_eqs)) {
-                     emo_coeffs <- emo_eqs$df[[1]]
-                 } else {
-                     emo_coeffs <- emo_eqs
-                 }
-             }
-        }
-        
+
         if (!is.null(emo_coeffs)) {
-            # Predict Emotion
+            # Predict Emotion from fundamental + transient identity EPAs
             predict_emo <- function(fund, trans) {
                 in_vec <- c(fund, trans)
                 z_e <- emo_coeffs[, 1]
@@ -188,13 +234,13 @@ if (!is.null(ae) && !is.null(be) && !is.null(oe)) {
                 coef_m <- as.matrix(emo_coeffs[, 2:ncol(emo_coeffs)])
                 return(as.vector(d_r %*% coef_m))
             }
-            
+
             result$actor_emotion <- predict_emo(ae, t_ae)
             result$object_emotion <- predict_emo(oe, t_oe)
-        } 
-        
+        }
+
         result$success <- TRUE
-        
+
     }, error = function(e) {
         result$error <- paste("R Error:", conditionMessage(e))
     })

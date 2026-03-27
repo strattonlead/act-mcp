@@ -111,18 +111,22 @@ public class ConversationService : IConversationService
 
         if (interaction.Result == null)
         {
-            // For transient chaining: use the last event's result in this situation as input.
-            // This ensures event N uses transient outcomes from event N-1 (not fundamentals).
-            InteractionResult? previousResult = null;
+            // For transient chaining: build identity→transient map from previous events.
+            // This correctly handles actor/object role swaps between events.
+            Dictionary<string, double[]>? transientsByIdentity = null;
             if (targetSituation.Events.Count > 0)
             {
                 var lastEvent = targetSituation.Events.LastOrDefault();
                 if (lastEvent?.Result != null)
                 {
-                    previousResult = lastEvent.Result;
+                    transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [lastEvent.Actor.Identity] = lastEvent.Result.TransientActorEPA,
+                        [lastEvent.Object.Identity] = lastEvent.Result.TransientObjectEPA
+                    };
                 }
             }
-            interaction.Result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
+            interaction.Result = await _actProcessingService.CalculateInteractionAsync(interaction, transientsByIdentity);
         }
 
         targetSituation.Events.Add(interaction);

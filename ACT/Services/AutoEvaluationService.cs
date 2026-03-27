@@ -135,9 +135,10 @@ public class AutoEvaluationService : IAutoEvaluationService
             {
                 var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
 
-                // Track the previous event's result for transient chaining within this situation.
-                // Each situation starts fresh (null = use fundamentals for event 1).
-                InteractionResult? previousResult = null;
+                // Track transient EPAs by identity name for correct chaining.
+                // When actor/object roles swap between events, this ensures each identity
+                // gets the correct transient regardless of which slot it was in.
+                Dictionary<string, double[]>? transientsByIdentity = null;
 
                 foreach (var evt in detSit.Events)
                 {
@@ -165,9 +166,15 @@ public class AutoEvaluationService : IAutoEvaluationService
 
                         try
                         {
-                            var result = await _actProcessingService.CalculateInteractionAsync(interaction, previousResult);
+                            var result = await _actProcessingService.CalculateInteractionAsync(interaction, transientsByIdentity);
                             interaction.Result = result;
-                            previousResult = result;
+
+                            transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                [interaction.Actor.Identity] = result.TransientActorEPA,
+                                [interaction.Object.Identity] = result.TransientObjectEPA
+                            };
+
                             await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
                         }
                         catch (Exception iex)
