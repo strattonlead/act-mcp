@@ -45,6 +45,7 @@ public class BatchEvaluationService : IBatchEvaluationService
     // Better: Read to temporary file or MemoryStream upon "Add".
 
     private readonly Dictionary<Guid, (Stream Stream, string FileName, string ContentType)> _pendingStreams = new();
+    private readonly LlmProviderConfig _llmConfig;
 
     public event Action? OnChange;
 
@@ -57,6 +58,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         IActProcessingService actProcessingService,
         IFileRepository fileRepository,
         IBatchFileStatusService fileStatusService,
+        LlmProviderConfig llmConfig,
         ILogger<BatchEvaluationService> logger)
     {
         _s3Service = s3Service;
@@ -67,6 +69,7 @@ public class BatchEvaluationService : IBatchEvaluationService
         _actProcessingService = actProcessingService;
         _fileRepository = fileRepository;
         _fileStatusService = fileStatusService;
+        _llmConfig = llmConfig;
         _logger = logger;
     }
 
@@ -74,17 +77,39 @@ public class BatchEvaluationService : IBatchEvaluationService
 
     public async Task AddFilesAsync(IReadOnlyList<IBrowserFile> files)
     {
+        // Get existing conversation names to skip duplicates
+        var existingNames = (await _conversationService.GetAllAsync())
+            .Select(c => c.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         foreach (var file in files)
         {
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(file.Name);
 
-            var status = new BatchFileStatus
+            // Skip if a conversation with this name already exists
+            if (existingNames.Contains(nameWithoutExt))
+            {
+                var status = new BatchFileStatus
+                {
+                    FileName = file.Name,
+                    ContentType = file.ContentType,
+                    Size = file.Size,
+                    State = BatchFileState.Skipped,
+                    StatusMessage = "Conversation already exists"
+                };
+                _fileStatusService.Add(status);
+                NotifyStateChanged();
+                continue;
+            }
+
+            var fileStatus = new BatchFileStatus
             {
                 FileName = file.Name,
                 ContentType = file.ContentType,
                 Size = file.Size,
                 State = BatchFileState.Pending
             };
-            _fileStatusService.Add(status);
+            _fileStatusService.Add(fileStatus);
 
             // Copy to memory stream to avoid IBrowserFile timeout issues during later processing
             // Limit 10MB per file for safety
@@ -92,7 +117,10 @@ public class BatchEvaluationService : IBatchEvaluationService
             await file.OpenReadStream(10 * 1024 * 1024).CopyToAsync(ms);
             ms.Position = 0;
 
-            _pendingStreams[status.Id] = (ms, file.Name, file.ContentType);
+            _pendingStreams[fileStatus.Id] = (ms, file.Name, file.ContentType);
+
+            // Track the name so subsequent files in the same batch don't duplicate either
+            existingNames.Add(nameWithoutExt);
 
             NotifyStateChanged();
         }
@@ -115,9 +143,10 @@ public class BatchEvaluationService : IBatchEvaluationService
             return;
         }
 
-        // Process files in parallel (up to MaxParallelFiles at a time)
-        const int MaxParallelFiles = 20;
-        var semaphore = new SemaphoreSlim(MaxParallelFiles);
+        // Sequential for local models (Ollama), parallel for cloud APIs
+        int maxParallel = _llmConfig.IsLocalModel ? 1 : 20;
+        _logger.LogInformation("Batch processing mode: {Mode} (max parallel: {Max})", _llmConfig.IsLocalModel ? "sequential" : "parallel", maxParallel);
+        var semaphore = new SemaphoreSlim(maxParallel);
 
         var targetIdentities = (forcedIdentities != null && forcedIdentities.Any())
             ? forcedIdentities
@@ -205,13 +234,26 @@ public class BatchEvaluationService : IBatchEvaluationService
 
         var parsedMessages = await _chatAgent.ParseMessagesAsync(status.ExtractedText);
 
+        // Store raw text, parsed messages, and total turns
+        conversation.RawText = status.ExtractedText;
+        conversation.ParsedMessages = parsedMessages;
+        conversation.TotalTurns = parsedMessages.Count;
+        await _conversationService.UpdateAsync(conversation);
+
         // 5. Analyze - Label Identities
         status.StatusMessage = "Labeling identities...";
         status.Progress = 60;
         NotifyStateChanged();
 
         var labeledSpeakers = await _chatAgent.LabelIdentitiesAsync(parsedMessages, availableIdentities);
-        var speakerMap = labeledSpeakers.ToDictionary(s => s.OriginalLabel, s => s);
+        // Build speaker map with multiple lookup keys: original label, identity, and display name
+        var speakerMap = new Dictionary<string, LabeledSpeaker>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in labeledSpeakers)
+        {
+            speakerMap.TryAdd(s.OriginalLabel, s);
+            speakerMap.TryAdd(s.Identity, s);
+            speakerMap.TryAdd(s.DisplayName, s);
+        }
 
         // Add Persons to Conversation
         foreach (var speaker in labeledSpeakers)
@@ -231,69 +273,113 @@ public class BatchEvaluationService : IBatchEvaluationService
 
         var detectedSituations = await _chatAgent.DetectSituationsAsync(parsedMessages, labeledSpeakers, availableBehaviors);
 
-        // 7. Calculate and Save
+        // 7. Calculate and Save — track processed turns via originalMessage matching
         status.StatusMessage = "Calculating EPA...";
         status.Progress = 90;
         NotifyStateChanged();
+
+        // Collect all original messages from parsed turns for matching
+        var unmatchedTurns = new HashSet<int>(parsedMessages.Select(m => m.Order));
+        int processedTurns = 0;
 
         foreach (var detSit in detectedSituations)
         {
             var situation = await _conversationService.AddSituationAsync(conversation.Id, detSit.Name);
 
             // Track transient EPAs by identity name for correct chaining.
-            // When actor/object roles swap between events, this ensures each identity
-            // gets the correct transient regardless of which slot (actor vs object) it was in.
-            // Each situation starts fresh (null = use fundamentals for event 1).
             Dictionary<string, double[]>? transientsByIdentity = null;
 
             foreach (var evt in detSit.Events)
             {
+                if (string.IsNullOrEmpty(evt.ActorSpeaker) || string.IsNullOrEmpty(evt.ObjectSpeaker))
+                {
+                    _logger.LogWarning("Skipping event '{Behavior}': null/empty speaker fields.", evt.Behavior);
+                    continue;
+                }
                 var actorSpeaker = speakerMap.GetValueOrDefault(evt.ActorSpeaker);
                 var objectSpeaker = speakerMap.GetValueOrDefault(evt.ObjectSpeaker);
 
-                if (actorSpeaker != null && objectSpeaker != null)
+                if (actorSpeaker == null || objectSpeaker == null)
                 {
-                    var interaction = new Interaction
+                    _logger.LogWarning("Skipping event '{Behavior}': speaker mapping failed. ActorSpeaker='{Actor}' (found={ActorFound}), ObjectSpeaker='{Object}' (found={ObjectFound}). Available keys: [{Keys}]",
+                        evt.Behavior, evt.ActorSpeaker, actorSpeaker != null, evt.ObjectSpeaker, objectSpeaker != null,
+                        string.Join(", ", speakerMap.Keys));
+                    continue;
+                }
+
+                var interaction = new Interaction
+                {
+                    Actor = new Person
                     {
-                        Actor = new Person
-                        {
-                            Name = actorSpeaker.DisplayName,
-                            Identity = actorSpeaker.Identity,
-                            Gender = "average"
-                        },
-                        Object = new Person
-                        {
-                            Name = objectSpeaker.DisplayName,
-                            Identity = objectSpeaker.Identity,
-                            Gender = "average"
-                        },
-                        Behavior = evt.Behavior
+                        Name = actorSpeaker.DisplayName,
+                        Identity = actorSpeaker.Identity,
+                        Gender = "average"
+                    },
+                    Object = new Person
+                    {
+                        Name = objectSpeaker.DisplayName,
+                        Identity = objectSpeaker.Identity,
+                        Gender = "average"
+                    },
+                    Behavior = evt.Behavior,
+                    OriginalMessage = evt.OriginalMessage
+                };
+
+                try
+                {
+                    var result = await _actProcessingService.CalculateInteractionAsync(interaction, transientsByIdentity);
+                    interaction.Result = result;
+
+                    transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [interaction.Actor.Identity] = result.TransientActorEPA,
+                        [interaction.Object.Identity] = result.TransientObjectEPA
                     };
 
-                    try
-                    {
-                        var result = await _actProcessingService.CalculateInteractionAsync(interaction, transientsByIdentity);
-                        interaction.Result = result;
+                    await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
+                    processedTurns++;
 
-                        // Update transient map: store each identity's transient by its name
-                        transientsByIdentity = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            [interaction.Actor.Identity] = result.TransientActorEPA,
-                            [interaction.Object.Identity] = result.TransientObjectEPA
-                        };
-
-                        await _conversationService.AddEventAsync(conversation.Id, situation, interaction);
-                    }
-                    catch (Exception iex)
+                    // Try to match this event back to a parsed turn
+                    if (!string.IsNullOrEmpty(evt.OriginalMessage))
                     {
-                        _logger.LogWarning(iex, $"Failed to calculate EPA for event: {evt.Behavior}");
+                        var matchedTurn = parsedMessages.FirstOrDefault(m =>
+                            unmatchedTurns.Contains(m.Order) &&
+                            (m.Content.Equals(evt.OriginalMessage, StringComparison.OrdinalIgnoreCase) ||
+                             m.Content.Contains(evt.OriginalMessage, StringComparison.OrdinalIgnoreCase) ||
+                             evt.OriginalMessage.Contains(m.Content, StringComparison.OrdinalIgnoreCase)));
+                        if (matchedTurn != null)
+                            unmatchedTurns.Remove(matchedTurn.Order);
                     }
+                }
+                catch (Exception iex)
+                {
+                    _logger.LogWarning(iex, $"Failed to calculate EPA for event: {evt.Behavior}");
                 }
             }
         }
 
+        // 8. Update conversation with turn tracking and eval status
+        var finalConv = await _conversationService.GetByIdAsync(conversation.Id);
+        if (finalConv != null)
+        {
+            finalConv.TotalTurns = parsedMessages.Count;
+            finalConv.ProcessedTurns = processedTurns;
+            finalConv.AutoEvalAt = DateTime.UtcNow;
+
+            if (parsedMessages.Count == 0)
+                finalConv.AutoEvalStatus = "Failed: No turns parsed";
+            else if (processedTurns == 0)
+                finalConv.AutoEvalStatus = "Failed: No turns could be processed";
+            else if (processedTurns == parsedMessages.Count)
+                finalConv.AutoEvalStatus = "Success";
+            else
+                finalConv.AutoEvalStatus = $"Partial: {processedTurns}/{parsedMessages.Count} turns";
+
+            await _conversationService.UpdateAsync(finalConv);
+        }
+
         status.State = BatchFileState.Completed;
-        status.StatusMessage = "Done";
+        status.StatusMessage = $"Done ({processedTurns}/{parsedMessages.Count} turns)";
         status.Progress = 100;
         NotifyStateChanged();
     }

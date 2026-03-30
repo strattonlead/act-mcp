@@ -14,6 +14,7 @@ public interface IConversationService
     Task<Conversation> CreateAsync(string name, string dictionaryKey);
     Task AddPersonAsync(Guid conversationId, Person person);
     Task ClearPersonsAsync(Guid conversationId);
+    Task ClearSituationsAsync(Guid conversationId);
     Task<Situation> AddSituationAsync(Guid conversationId, string type);
     Task AddEventAsync(Guid conversationId, Situation situation, Interaction interaction);
     Task UpdateAsync(Conversation conversation);
@@ -84,6 +85,17 @@ public class ConversationService : IConversationService
         }
     }
 
+    public async Task ClearSituationsAsync(Guid conversationId)
+    {
+        var conv = await _repository.GetByIdAsync(conversationId);
+        if (conv != null)
+        {
+            conv.Situations.Clear();
+            conv.ProcessedTurns = 0;
+            await _repository.UpdateAsync(conv);
+        }
+    }
+
     public async Task<Situation> AddSituationAsync(Guid conversationId, string type)
     {
         var conv = await _repository.GetByIdAsync(conversationId);
@@ -102,12 +114,17 @@ public class ConversationService : IConversationService
         if (conv == null) throw new ArgumentException("Conversation not found");
 
         var targetSituation = conv.Situations.FirstOrDefault(s => s.Id == situation.Id);
+
+        // Fallback: match by Type if ID lookup fails (can happen if ID doesn't survive DB round-trip)
         if (targetSituation == null)
-        {
-             // Fallback: try to match by type if ID not present in passed object (backward compat?)
-             // But valid situations should have IDs now.
-             throw new ArgumentException("Situation not found in conversation");
-        }
+            targetSituation = conv.Situations.FirstOrDefault(s => s.Type == situation.Type);
+
+        // Last resort: use the last situation
+        if (targetSituation == null)
+            targetSituation = conv.Situations.LastOrDefault();
+
+        if (targetSituation == null)
+            throw new ArgumentException("Situation not found in conversation");
 
         if (interaction.Result == null)
         {

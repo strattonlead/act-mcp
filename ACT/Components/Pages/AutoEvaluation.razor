@@ -194,16 +194,16 @@
                         {
                             <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
                         }
-                        Detect Situations
+                        Detect Events
                     </MudButton>
                 </div>
             </MudPaper>
         </MudStep>
 
-        <!-- Step 5: Situations & Events with EPA -->
-        <MudStep Title="Situations & EPA">
+        <!-- Step 5: Events with EPA -->
+        <MudStep Title="Events & EPA">
             <MudPaper Class="pa-4">
-                <MudText Typo="Typo.h6" Class="mb-3">Step 5: Situations & Events</MudText>
+                <MudText Typo="Typo.h6" Class="mb-3">Step 5: Events & EPA Calculation</MudText>
                 
                 @if (_state.DetectedSituations.Any())
                 {
@@ -413,14 +413,15 @@
                 _state.LabeledSpeakers, 
                 _behaviors);
             
-            if (_state.DetectedSituations.Any())
+            var totalEvts = _state.DetectedSituations.Sum(s => s.Events?.Count ?? 0);
+            if (totalEvts > 0)
             {
                 _currentStep++;
-                Snackbar.Add($"Detected {_state.DetectedSituations.Count} situations!", Severity.Success);
+                Snackbar.Add($"Assigned behaviors to {totalEvts} events!", Severity.Success);
             }
             else
             {
-                Snackbar.Add("Could not detect situations.", Severity.Warning);
+                Snackbar.Add("Could not assign behaviors to events.", Severity.Warning);
             }
         }
         catch (Exception ex)

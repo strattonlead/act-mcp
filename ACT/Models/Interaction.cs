@@ -7,6 +7,9 @@ public class Interaction
     public string Behavior { get; set; } = string.Empty;
     public InteractionResult? Result { get; set; }
 
+    /// <summary>The original chat message that generated this event.</summary>
+    public string? OriginalMessage { get; set; }
+
     public override string ToString()
     {
         // Format: Person 1[_,student],requests somethong from,Person 2[_,assistant]

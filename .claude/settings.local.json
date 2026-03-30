@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/createIF/act-mcp/ACT/Services/*.cs)",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@46.224.154.114 \"docker logs --tail 100 hso_act_mcp 2>&1\")",
+      "Bash(xargs grep:*)",
+      "Bash(grep -E \"\\\\.\\(R|cs\\)$\")",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@46.224.154.114 \"docker exec hso_act_mcp Rscript /src/ACT/Scripts/get_act_behaviors.R germany2007\")",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@46.224.154.114 \"docker exec hso_act_mcp find / -name ''get_act_behaviors.R'' 2>/dev/null\")",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@46.224.154.114 \"docker exec hso_act_mcp Rscript /app/Scripts/get_act_behaviors.R germany2007\")",
+      "Bash(dotnet build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(ssh root@46.224.154.114 \"docker logs hso_act_mcp --tail 100 2>&1\")",
+      "Bash(grep -E \"Fehler$|error [A-Z]\")",
+      "Bash(powershell -Command \"\\(Get-Item ''C:\\\\createIF\\\\act-mcp\\\\ACT\\\\InteractGuide.pdf''\\).Length / 1MB\")",
+      "Bash(pip install:*)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

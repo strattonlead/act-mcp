@@ -13,6 +13,8 @@
 @inject ISnackbar Snackbar
 @inject IAutoEvaluationService AutoEvaluationService
 @inject IBatchFileStatusService BatchFileStatusService
+@inject IChatAgent ChatAgent
+@inject IFileParsingService FileParsingService
 @implements IDisposable
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
@@ -64,15 +66,30 @@
                          {
                              <MudChip T="string" Color="Color.Info" Icon="@Icons.Material.Filled.AttachFile" Class="ml-2">@_attachedFile.FileName</MudChip>
 
-                             @if (!_conversation.Situations.Any() && !AutoEvaluationService.IsProcessing(_conversation.Id))
+                             @if (!AutoEvaluationService.IsProcessing(_conversation.Id))
                              {
-                                 <MudButton Variant="Variant.Filled" 
-                                            Color="Color.Secondary" 
-                                            Class="ml-4" 
-                                            StartIcon="@Icons.Material.Filled.AutoAwesome"
-                                            OnClick="StartAutoEval">
-                                     Auto Eval
-                                 </MudButton>
+                                 var isFirstEval = _conversation.AutoEvalStatus == null && !_conversation.Situations.Any();
+
+                                 @if (isFirstEval)
+                                 {
+                                     <MudButton Variant="Variant.Filled"
+                                                Color="Color.Secondary"
+                                                Class="ml-4"
+                                                StartIcon="@Icons.Material.Filled.AutoAwesome"
+                                                OnClick="StartAutoEval">
+                                         Auto Eval
+                                     </MudButton>
+                                 }
+                                 else
+                                 {
+                                     <MudButton Variant="Variant.Outlined"
+                                                Color="@(_conversation.AutoEvalStatus == "Success" ? Color.Default : Color.Warning)"
+                                                Class="ml-4"
+                                                StartIcon="@Icons.Material.Filled.Refresh"
+                                                OnClick="StartAutoEval">
+                                         Re-Eval (@_conversation.ProcessedTurns/@_conversation.TotalTurns)
+                                     </MudButton>
+                                 }
                              }
                          }
 
@@ -99,6 +116,55 @@
                 </MudGrid>
             </MudPaper>
         </MudItem>
+
+        @if (_conversation.AttachedFileId.HasValue && (!string.IsNullOrEmpty(_conversation.RawText) || _conversation.ParsedMessages.Any()))
+        {
+            <MudItem xs="12">
+                <MudPaper Class="pa-4">
+                    <div class="d-flex justify-space-between align-center mb-2">
+                        <MudText Typo="Typo.h6">Source Content</MudText>
+                        <div class="d-flex gap-2 align-center">
+                            <MudToggleGroup T="string" @bind-Value="_sourceViewMode" Color="Color.Primary" Size="Size.Small">
+                                <MudToggleItem Value="@("turns")" Text="Turns" />
+                                <MudToggleItem Value="@("raw")" Text="Raw Text" />
+                            </MudToggleGroup>
+                            <MudButton Variant="Variant.Outlined" Color="Color.Warning" Size="Size.Small"
+                                       StartIcon="@Icons.Material.Filled.Refresh" OnClick="ReParseTurns"
+                                       Disabled="@(_isReparsing || !_conversation.AttachedFileId.HasValue)">
+                                @(_isReparsing ? "Re-parsing..." : "Re-parse Turns")
+                            </MudButton>
+                        </div>
+                    </div>
+
+                    @if (_sourceViewMode == "raw" && !string.IsNullOrEmpty(_conversation.RawText))
+                    {
+                        <MudPaper Elevation="0" Outlined="true" Class="pa-3" Style="max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem;">
+                            @_conversation.RawText
+                        </MudPaper>
+                    }
+                    else if (_sourceViewMode == "turns" && _conversation.ParsedMessages.Any())
+                    {
+                        <div style="max-height: 400px; overflow-y: auto;">
+                            @foreach (var msg in _conversation.ParsedMessages.OrderBy(m => m.Order))
+                            {
+                                <MudPaper Elevation="0" Outlined="true" Class="pa-2 mb-1">
+                                    <div class="d-flex gap-2">
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Filled" Style="min-width: 40px;">@msg.Order</MudChip>
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Outlined">@msg.Speaker</MudChip>
+                                        <MudText Typo="Typo.body2" Style="white-space: pre-wrap;">@msg.Content</MudText>
+                                    </div>
+                                </MudPaper>
+                            }
+                        </div>
+                        <MudText Typo="Typo.caption" Class="mt-2">@_conversation.ParsedMessages.Count turns parsed</MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">No source data available. Run Auto Eval to parse the attached file.</MudText>
+                    }
+                </MudPaper>
+            </MudItem>
+        }
 
         <!-- Persons Section -->
         <MudItem xs="12" md="4">
@@ -127,24 +193,33 @@
             </MudPaper>
         </MudItem>
 
-        <!-- situations & Events Section -->
+        <!-- Events Section -->
         <MudItem xs="12" md="8">
              <MudPaper Class="pa-4" Style="height: 100%">
                 <div class="d-flex justify-space-between align-center mb-2">
-                    <MudText Typo="Typo.h6">Situations</MudText>
-                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="AddSituation" Disabled="@(!_conversation.Persons.Any())">Add Situation</MudButton>
+                    <div class="d-flex align-center gap-2">
+                        <MudText Typo="Typo.h6">Events</MudText>
+                        @if (_conversation.TotalTurns > 0)
+                        {
+                            var evtCount = _conversation.Situations.Sum(s => s.Events?.Count ?? 0);
+                            <MudChip T="string" Size="Size.Small" Color="@(_conversation.ProcessedTurns >= _conversation.TotalTurns ? Color.Success : Color.Warning)" Variant="Variant.Outlined">
+                                @_conversation.ProcessedTurns/@_conversation.TotalTurns turns | @evtCount events
+                            </MudChip>
+                        }
+                    </div>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="AddSituation" Disabled="@(!_conversation.Persons.Any())">Add Interaction</MudButton>
                 </div>
 
                 @if (!_conversation.Situations.Any())
                 {
-                     <MudText Typo="Typo.body2" Color="Color.Secondary">Add a situation to start modeling events.</MudText>
+                     <MudText Typo="Typo.body2" Color="Color.Secondary">Add an interaction or run Auto Eval to generate events.</MudText>
                 }
                 else
                 {
                     <MudExpansionPanels MultiExpansion="true">
                         @foreach (var situation in _conversation.Situations)
                         {
-                            <MudExpansionPanel Text="@($"Situation: {situation.Type}")">
+                            <MudExpansionPanel Text="@($"Interaction: {situation.Type}")" IsInitiallyExpanded="true">
                                 <TitleContent>
                                     <div class="d-flex align-center gap-4">
                                         <MudText><b>@situation.Type</b></MudText>
@@ -152,11 +227,17 @@
                                     </div>
                                 </TitleContent>
                                 <ChildContent>
-                                    <!-- Events List -->
+                                    <!-- Events List with Original Messages -->
                                     <div class="d-flex flex-column gap-2 mb-4">
                                         @foreach (var evt in situation.Events)
                                         {
                                             <MudCard Elevation="1" Class="pa-2">
+                                                @if (!string.IsNullOrEmpty(evt.OriginalMessage))
+                                                {
+                                                    <MudText Typo="Typo.body2" Class="mb-2 pa-2" Style="background-color: var(--mud-palette-background-gray); border-radius: 4px; font-style: italic; white-space: pre-wrap;">
+                                                        @evt.OriginalMessage
+                                                    </MudText>
+                                                }
                                                 <div class="d-flex align-center gap-2">
                                                     <MudText Color="Color.Primary"><b>@evt.Actor.Name</b> (@evt.Actor.Identity)</MudText>
                                                     <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
@@ -241,19 +322,39 @@
         </div>
         
         <MudDivider Class="my-4" />
-        
-        <MudText Typo="Typo.h6" Class="mb-2">Conversation Timeline</MudText>
-        <MudTimeline TimelineOrientation="TimelineOrientation.Horizontal" TimelinePosition="TimelinePosition.Top">
-            @foreach (var sit in _conversation.Situations)
+
+        <div class="d-flex justify-space-between align-center mb-2">
+            <MudText Typo="Typo.h6">Conversation Timeline</MudText>
+            @if (_conversation.Situations.Any())
             {
-                <MudTimelineItem Color="Color.Info" Variant="Variant.Filled">
-                    <ItemContent>
-                        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">@sit.Type</MudAlert>
-                        <MudText Typo="Typo.caption">@sit.Events.Count events</MudText>
-                    </ItemContent>
-                </MudTimelineItem>
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Info"
+                           StartIcon="@Icons.Material.Filled.OpenInFull" OnClick="@(() => _showTimelineDialog = true)">
+                    Expand
+                </MudButton>
             }
-        </MudTimeline>
+        </div>
+        @{ var allEvents = _conversation.Situations.SelectMany(s => s.Events).ToList(); }
+        <div style="overflow-x: auto; white-space: nowrap; padding-bottom: 8px;">
+            <MudTimeline TimelineOrientation="TimelineOrientation.Horizontal" TimelinePosition="TimelinePosition.Top">
+                @foreach (var evt in allEvents)
+                {
+                    var deflColor = evt.Result != null
+                        ? (evt.Result.Deflection < 4 ? Color.Success : evt.Result.Deflection < 8 ? Color.Warning : Color.Error)
+                        : Color.Default;
+                    <MudTimelineItem Color="@deflColor" Variant="Variant.Filled">
+                        <ItemContent>
+                            <MudText Typo="Typo.caption" Style="white-space: normal; min-width: 120px;">
+                                <b>@evt.Actor.Name</b> → @evt.Behavior → <b>@evt.Object.Name</b>
+                                @if (evt.Result != null)
+                                {
+                                    <br/><span>D=@evt.Result.Deflection.ToString("F1")</span>
+                                }
+                            </MudText>
+                        </ItemContent>
+                    </MudTimelineItem>
+                }
+            </MudTimeline>
+        </div>
     </MudPaper>
     
     <div class="mt-4 d-flex justify-end">
@@ -282,6 +383,51 @@
     </MudPaper>
 </MudOverlay>
 
+<!-- Timeline Dialog (vertical, expanded) -->
+<MudOverlay @bind-Visible="_showTimelineDialog" DarkBackground="true" AutoClose="true" ZIndex="9999">
+    <MudPaper Class="pa-4" Style="max-width: 800px; width: 90vw; max-height: 90vh; overflow-y: auto;">
+        <div class="d-flex justify-space-between align-center mb-4">
+            <MudText Typo="Typo.h5">Conversation Timeline</MudText>
+            <MudIconButton Icon="@Icons.Material.Filled.Close" OnClick="@(() => _showTimelineDialog = false)" />
+        </div>
+        @{ var dialogEvents = _conversation.Situations.SelectMany(s => s.Events).ToList(); }
+        <MudTimeline TimelineOrientation="TimelineOrientation.Vertical" TimelinePosition="TimelinePosition.Start">
+            @foreach (var evt in dialogEvents)
+            {
+                var dlgDeflColor = evt.Result != null
+                    ? (evt.Result.Deflection < 4 ? Color.Success : evt.Result.Deflection < 8 ? Color.Warning : Color.Error)
+                    : Color.Default;
+                <MudTimelineItem Color="@dlgDeflColor" Variant="Variant.Filled">
+                    <ItemContent>
+                        <MudCard Elevation="1" Class="pa-2 mb-1">
+                            @if (!string.IsNullOrEmpty(evt.OriginalMessage))
+                            {
+                                <MudText Typo="Typo.body2" Class="mb-1 pa-1" Style="background-color: var(--mud-palette-background-gray); border-radius: 4px; font-style: italic; white-space: pre-wrap;">
+                                    @evt.OriginalMessage
+                                </MudText>
+                            }
+                            <div class="d-flex align-center gap-1 flex-wrap">
+                                <MudText Color="Color.Primary"><b>@evt.Actor.Name</b></MudText>
+                                <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                <MudText Class="font-italic">@evt.Behavior</MudText>
+                                <MudIcon Icon="@Icons.Material.Filled.ArrowForward" Size="Size.Small" />
+                                <MudText Color="Color.Secondary"><b>@evt.Object.Name</b></MudText>
+                                @if (evt.Result != null)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                             Color="@dlgDeflColor">
+                                        D=@evt.Result.Deflection.ToString("F2")
+                                    </MudChip>
+                                }
+                            </div>
+                        </MudCard>
+                    </ItemContent>
+                </MudTimelineItem>
+            }
+        </MudTimeline>
+    </MudPaper>
+</MudOverlay>
+
 @code {
     [Parameter] public Guid? Id { get; set; }
 
@@ -306,6 +452,13 @@
     private IBrowserFile _uploadedFile;
     private UploadedFile _attachedFile;
     private bool _isUploading;
+
+    // Source content viewer
+    private string _sourceViewMode = "turns";
+    private bool _isReparsing;
+
+    // Timeline dialog
+    private bool _showTimelineDialog;
 
     // Deflection Graph
     private int _chartIndex = -1;
@@ -476,7 +629,7 @@
 
     private async Task AddSituation()
     {
-        var typeName = $"Situation {_conversation.Situations.Count + 1}";
+        var typeName = "Interaction";
         if (Id.HasValue)
         {
             var s = await ConversationService.AddSituationAsync(_conversation.Id, typeName);
@@ -673,6 +826,46 @@
         
         _xAxisLabels = labels.ToArray();
     }
+    private async Task ReParseTurns()
+    {
+        if (!_conversation.AttachedFileId.HasValue) return;
+        _isReparsing = true;
+        StateHasChanged();
+
+        try
+        {
+            // Get raw text: reuse if available, otherwise re-extract from file
+            var rawText = _conversation.RawText;
+            if (string.IsNullOrEmpty(rawText))
+            {
+                var uploadedFile = await FileRepository.GetByIdAsync(_conversation.AttachedFileId.Value);
+                if (uploadedFile == null) throw new Exception("File not found");
+                using var stream = await S3Service.GetFileStreamAsync(uploadedFile.S3BucketName, uploadedFile.S3Key);
+                rawText = await FileParsingService.ExtractTextAsync(stream, uploadedFile.FileName);
+            }
+
+            // Re-parse with the deterministic + LLM parser
+            var parsedMessages = await ChatAgent.ParseMessagesAsync(rawText);
+
+            // Update conversation
+            _conversation.RawText = rawText;
+            _conversation.ParsedMessages = parsedMessages;
+            _conversation.TotalTurns = parsedMessages.Count;
+            await ConversationService.UpdateAsync(_conversation);
+
+            Snackbar.Add($"Re-parsed: {parsedMessages.Count} turns found.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Re-parse failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isReparsing = false;
+            StateHasChanged();
+        }
+    }
+
     private async Task StartAutoEval()
     {
         if (_conversation.Id == Guid.Empty && !_conversation.AttachedFileId.HasValue) return;

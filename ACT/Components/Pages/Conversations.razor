@@ -7,20 +7,116 @@
 @inject IDialogService DialogService
 @inject IAutoEvaluationService AutoEvaluationService
 @inject IBatchFileStatusService BatchFileStatusService
+@inject IChatAgent ChatAgent
+@inject IFileParsingService FileParsingService
+@inject IFileRepository FileRepository
+@inject IS3Service S3Service
 @implements IDisposable
 
 <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="mt-4">
     <div class="d-flex justify-space-between align-center mb-4">
         <MudText Typo="Typo.h3">Conversations</MudText>
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="CreateNewConversation">
-            New Conversation
-        </MudButton>
+        <div class="d-flex gap-2">
+            @if (_conversations.Any())
+            {
+                @if (NeedEvalCount > 0)
+                {
+                    <MudButton Variant="Variant.Outlined" Color="Color.Info" StartIcon="@Icons.Material.Filled.AutoFixHigh" OnClick="AutoEvalUnevaluated" Disabled="_isAutoEvalRunning">
+                        @if (_isAutoEvalRunning)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                            @:Evaluating (@_autoEvalRemaining left)...
+                        }
+                        else
+                        {
+                            @:Auto Eval (@NeedEvalCount)
+                        }
+                    </MudButton>
+                }
+                <MudButton Variant="Variant.Outlined" Color="Color.Warning" StartIcon="@Icons.Material.Filled.TextSnippet" OnClick="ReParseAllTurns" Disabled="_isReparsing">
+                    @if (_isReparsing)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        @:Re-parsing (@_reparseRemaining left)...
+                    }
+                    else
+                    {
+                        @:Re-parse Turns
+                    }
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.DeleteSweep" OnClick="DeleteAllConversations">
+                    Delete All
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Color="Color.Secondary" StartIcon="@Icons.Material.Filled.Download" OnClick="DownloadAllZip" Disabled="_isExporting">
+                    @if (_isExporting)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        @:Exporting...
+                    }
+                    else
+                    {
+                        @:Download All (ZIP)
+                    }
+                </MudButton>
+            }
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="CreateNewConversation">
+                New Conversation
+            </MudButton>
+        </div>
     </div>
 
     @if (_conversations.Any())
     {
+        <div class="d-flex gap-4 mb-4 flex-wrap align-center">
+            <MudChip T="string" Color="@(_filter == "all" ? Color.Primary : Color.Default)"
+                     Variant="@(_filter == "all" ? Variant.Filled : Variant.Outlined)"
+                     Icon="@Icons.Material.Filled.Forum" OnClick="@(() => _filter = "all")" Style="cursor:pointer;">
+                @_conversations.Count total
+            </MudChip>
+            <MudChip T="string" Color="@(_filter == "success" ? Color.Success : Color.Success)"
+                     Variant="@(_filter == "success" ? Variant.Filled : Variant.Outlined)"
+                     Icon="@Icons.Material.Filled.CheckCircle" OnClick="@(() => _filter = "success")" Style="cursor:pointer;">
+                @SuccessCount success
+            </MudChip>
+            @if (PartialCount > 0)
+            {
+                <MudChip T="string" Color="Color.Warning"
+                         Variant="@(_filter == "partial" ? Variant.Filled : Variant.Outlined)"
+                         Icon="@Icons.Material.Filled.WarningAmber" OnClick="@(() => _filter = "partial")" Style="cursor:pointer;">
+                    @PartialCount partial
+                </MudChip>
+            }
+            @if (FailedCount > 0)
+            {
+                <MudChip T="string" Color="Color.Error"
+                         Variant="@(_filter == "failed" ? Variant.Filled : Variant.Outlined)"
+                         Icon="@Icons.Material.Filled.ErrorOutline" OnClick="@(() => _filter = "failed")" Style="cursor:pointer;">
+                    @FailedCount failed
+                </MudChip>
+            }
+            @if (UnevaluatedCount > 0)
+            {
+                <MudChip T="string" Color="@(_filter == "unevaluated" ? Color.Warning : Color.Warning)"
+                         Variant="@(_filter == "unevaluated" ? Variant.Filled : Variant.Outlined)"
+                         Icon="@Icons.Material.Filled.Refresh" OnClick="@(() => _filter = "unevaluated")" Style="cursor:pointer;">
+                    @UnevaluatedCount need eval
+                </MudChip>
+            }
+            @if (ProcessingCount > 0)
+            {
+                <MudChip T="string" Color="Color.Info" Variant="Variant.Outlined" Icon="@Icons.Material.Filled.HourglassTop">
+                    @ProcessingCount processing
+                </MudChip>
+            }
+            <MudChip T="string" Color="Color.Tertiary" Variant="Variant.Outlined" Icon="@Icons.Material.Filled.EventNote">
+                @TotalEvents events
+            </MudChip>
+            <MudChip T="string" Color="Color.Default" Variant="Variant.Outlined" Icon="@Icons.Material.Filled.ChatBubbleOutline">
+                @TotalTurnsProcessed/@TotalTurns turns
+            </MudChip>
+        </div>
         <MudGrid>
-            @foreach (var conv in _conversations)
+            @foreach (var conv in FilteredConversations)
             {
                 <MudItem xs="12" sm="6" md="4">
                     <MudCard>
@@ -33,8 +129,38 @@
                                     <MudIcon Icon="@Icons.Material.Filled.AttachFile" Size="Size.Small" Color="Color.Info" Title="File Attached" />
                                 }
                             </div>
-                            <MudText Typo="Typo.caption">Situations: @conv.Situations.Count</MudText>
-                            
+                            <MudText Typo="Typo.caption">
+                                Events: @conv.Situations.Sum(s => s.Events?.Count ?? 0)
+                                @if (conv.TotalTurns > 0)
+                                {
+                                    @: | Turns: @conv.ProcessedTurns/@conv.TotalTurns
+                                }
+                            </MudText>
+
+                            @if (conv.AutoEvalStatus != null)
+                            {
+                                @if (conv.AutoEvalStatus == "Success")
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Text" Icon="@Icons.Material.Filled.CheckCircle">
+                                        Evaluated (@conv.ProcessedTurns/@conv.TotalTurns)
+                                    </MudChip>
+                                }
+                                else if (conv.AutoEvalStatus.StartsWith("Partial"))
+                                {
+                                    <MudTooltip Text="@conv.AutoEvalStatus">
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text" Icon="@Icons.Material.Filled.WarningAmber">
+                                            Partial (@conv.ProcessedTurns/@conv.TotalTurns)
+                                        </MudChip>
+                                    </MudTooltip>
+                                }
+                                else if (conv.AutoEvalStatus.StartsWith("Failed"))
+                                {
+                                    <MudTooltip Text="@conv.AutoEvalStatus">
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Error" Variant="Variant.Text" Icon="@Icons.Material.Filled.ErrorOutline">Failed</MudChip>
+                                    </MudTooltip>
+                                }
+                            }
+
                             @if (AutoEvaluationService.IsProcessing(conv.Id))
                             {
                                 var status = AutoEvaluationService.GetProcessingStatus(conv.Id);
@@ -76,6 +202,32 @@
 
 @code {
     private List<Conversation> _conversations = new();
+    private bool _isExporting;
+    private bool _isAutoEvalRunning;
+    private int _autoEvalRemaining;
+    private bool _isReparsing;
+    private int _reparseRemaining;
+    private string _filter = "all";
+
+    private int UnevaluatedCount => _conversations.Count(c => c.AutoEvalStatus == null && !AutoEvaluationService.IsProcessing(c.Id));
+    private int NeedEvalCount => _conversations.Count(c => !AutoEvaluationService.IsProcessing(c.Id) &&
+        (c.AutoEvalStatus == null || c.AutoEvalStatus.StartsWith("Failed") || c.AutoEvalStatus.StartsWith("Partial")));
+    private int SuccessCount => _conversations.Count(c => c.AutoEvalStatus == "Success");
+    private int PartialCount => _conversations.Count(c => c.AutoEvalStatus != null && c.AutoEvalStatus.StartsWith("Partial"));
+    private int FailedCount => _conversations.Count(c => c.AutoEvalStatus != null && c.AutoEvalStatus.StartsWith("Failed"));
+    private int ProcessingCount => _conversations.Count(c => AutoEvaluationService.IsProcessing(c.Id));
+    private int TotalEvents => _conversations.Sum(c => c.Situations.Sum(s => s.Events?.Count ?? 0));
+    private int TotalTurns => _conversations.Sum(c => c.TotalTurns);
+    private int TotalTurnsProcessed => _conversations.Sum(c => c.ProcessedTurns);
+
+    private List<Conversation> FilteredConversations => _filter switch
+    {
+        "success" => _conversations.Where(c => c.AutoEvalStatus == "Success").ToList(),
+        "partial" => _conversations.Where(c => c.AutoEvalStatus != null && c.AutoEvalStatus.StartsWith("Partial")).ToList(),
+        "failed" => _conversations.Where(c => c.AutoEvalStatus != null && c.AutoEvalStatus.StartsWith("Failed")).ToList(),
+        "unevaluated" => _conversations.Where(c => c.AutoEvalStatus == null && !AutoEvaluationService.IsProcessing(c.Id)).ToList(),
+        _ => _conversations
+    };
 
     protected override async Task OnInitializedAsync()
     {
@@ -92,7 +244,12 @@
 
     private void HandleProcessingStateChanged(Guid conversationId)
     {
-        InvokeAsync(StateHasChanged);
+        // Reload conversations to pick up AutoEvalStatus changes
+        InvokeAsync(async () =>
+        {
+            await LoadConversations();
+            StateHasChanged();
+        });
     }
     
     private void HandleBatchStateChanged()
@@ -120,7 +277,195 @@
         using var streamRef = new DotNetStreamReference(stream);
         await JS.InvokeVoidAsync("window.downloadFileFromStream", $"conversation-{conv.Name.Replace(" ", "_")}.json", streamRef);
     }
+
+    private async Task DownloadAllZip()
+    {
+        _isExporting = true;
+        StateHasChanged();
+        try
+        {
+            using var zipStream = new System.IO.MemoryStream();
+            using (var archive = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+            {
+                var jsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+                foreach (var conv in _conversations)
+                {
+                    var safeName = string.Join("_", conv.Name.Split(System.IO.Path.GetInvalidFileNameChars()));
+                    var json = System.Text.Json.JsonSerializer.Serialize(conv, jsonOptions);
+                    var entry = archive.CreateEntry($"{safeName}.json", System.IO.Compression.CompressionLevel.Fastest);
+                    using var entryStream = entry.Open();
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+                    await entryStream.WriteAsync(bytes);
+                }
+            }
+            zipStream.Position = 0;
+            using var streamRef = new DotNetStreamReference(zipStream);
+            var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HHmm");
+            await JS.InvokeVoidAsync("window.downloadFileFromStream", $"conversations-{timestamp}.zip", streamRef);
+            Snackbar.Add($"Exported {_conversations.Count} conversations.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isExporting = false;
+            StateHasChanged();
+        }
+    }
     
+    private async Task AutoEvalUnevaluated()
+    {
+        var targets = _conversations
+            .Where(c => !AutoEvaluationService.IsProcessing(c.Id) &&
+                (c.AutoEvalStatus == null || c.AutoEvalStatus.StartsWith("Failed") || c.AutoEvalStatus.StartsWith("Partial")))
+            .ToList();
+
+        if (!targets.Any()) return;
+
+        _isAutoEvalRunning = true;
+        _autoEvalRemaining = targets.Count;
+        StateHasChanged();
+
+        try
+        {
+            foreach (var conv in targets)
+            {
+                try
+                {
+                    await AutoEvaluationService.EvaluateConversationAsync(conv.Id);
+                }
+                catch (Exception ex)
+                {
+                    Snackbar.Add($"Eval failed for '{conv.Name}': {ex.Message}", Severity.Warning);
+                }
+                _autoEvalRemaining--;
+                await LoadConversations();
+                StateHasChanged();
+            }
+            Snackbar.Add($"Auto evaluation completed for {targets.Count} conversations.", Severity.Info);
+        }
+        finally
+        {
+            _isAutoEvalRunning = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ReParseAllTurns()
+    {
+        var targets = _conversations
+            .Where(c => c.AttachedFileId.HasValue)
+            .ToList();
+
+        if (!targets.Any()) return;
+
+        _isReparsing = true;
+        _reparseRemaining = targets.Count;
+        StateHasChanged();
+
+        int changed = 0;
+        int unchanged = 0;
+
+        try
+        {
+            foreach (var conv in targets)
+            {
+                try
+                {
+                    // Get raw text: reuse if available, otherwise re-extract
+                    var rawText = conv.RawText;
+                    if (string.IsNullOrEmpty(rawText) && conv.AttachedFileId.HasValue)
+                    {
+                        var uploadedFile = await FileRepository.GetByIdAsync(conv.AttachedFileId.Value);
+                        if (uploadedFile != null)
+                        {
+                            using var stream = await S3Service.GetFileStreamAsync(uploadedFile.S3BucketName, uploadedFile.S3Key);
+                            rawText = await FileParsingService.ExtractTextAsync(stream, uploadedFile.FileName);
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(rawText))
+                    {
+                        _reparseRemaining--;
+                        continue;
+                    }
+
+                    // Re-parse with deterministic + LLM parser
+                    var newMessages = await ChatAgent.ParseMessagesAsync(rawText);
+
+                    // Compare: same count and same content = unchanged
+                    bool isSame = conv.ParsedMessages.Count == newMessages.Count &&
+                        conv.ParsedMessages
+                            .OrderBy(m => m.Order)
+                            .Zip(newMessages.OrderBy(m => m.Order))
+                            .All(pair => pair.First.Speaker == pair.Second.Speaker &&
+                                         pair.First.Content == pair.Second.Content);
+
+                    if (isSame)
+                    {
+                        unchanged++;
+                    }
+                    else
+                    {
+                        // Turns changed — update and mark as failed since events no longer match
+                        conv.RawText = rawText;
+                        conv.ParsedMessages = newMessages;
+                        conv.TotalTurns = newMessages.Count;
+                        conv.AutoEvalStatus = $"Failed: Turns changed ({conv.ParsedMessages.Count} → {newMessages.Count}), re-eval needed";
+                        conv.AutoEvalAt = DateTime.UtcNow;
+                        await ConversationService.UpdateAsync(conv);
+                        changed++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Snackbar.Add($"Re-parse failed for '{conv.Name}': {ex.Message}", Severity.Warning);
+                }
+
+                _reparseRemaining--;
+                StateHasChanged();
+            }
+
+            await LoadConversations();
+            Snackbar.Add($"Re-parse complete: {changed} changed (marked failed), {unchanged} unchanged.",
+                changed > 0 ? Severity.Warning : Severity.Success);
+        }
+        finally
+        {
+            _isReparsing = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DeleteAllConversations()
+    {
+        bool? result = await DialogService.ShowMessageBox(
+            "Delete All Conversations",
+            $"Are you sure you want to delete all {_conversations.Count} conversations? This action cannot be undone.",
+            yesText: "Delete All", cancelText: "Cancel");
+
+        if (result == true)
+        {
+            try
+            {
+                var count = _conversations.Count;
+                foreach (var conv in _conversations.ToList())
+                {
+                    await ConversationService.DeleteAsync(conv.Id);
+                }
+                await LoadConversations();
+                Snackbar.Add($"Deleted {count} conversations.", Severity.Success);
+            }
+            catch (Exception ex)
+            {
+                Snackbar.Add($"Error deleting conversations: {ex.Message}", Severity.Error);
+                await LoadConversations();
+            }
+        }
+    }
+
     private async Task DeleteConversation(Conversation conv)
     {
         bool? result = await DialogService.ShowMessageBox(

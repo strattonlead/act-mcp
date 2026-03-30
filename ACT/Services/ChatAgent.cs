@@ -65,7 +65,15 @@ public class ChatAgent : IChatAgent
 
     public async Task<List<ParsedMessage>> ParseMessagesAsync(string rawInput, CancellationToken ct = default)
     {
-        var systemPrompt = @"You are an expert at parsing conversation transcripts. 
+        // Try deterministic parsing first for structured chat formats (Speaker: message)
+        var deterministicResult = TryDeterministicParse(rawInput);
+        if (deterministicResult != null && deterministicResult.Count >= 2)
+        {
+            _logger.LogInformation("Deterministic parser found {Count} turns — skipping LLM.", deterministicResult.Count);
+            return deterministicResult;
+        }
+
+        var systemPrompt = @"You are an expert at parsing conversation transcripts.
 Your task is to identify individual messages from a raw conversation and determine who the speaker is.
 
 Rules:
@@ -73,10 +81,11 @@ Rules:
 - If no explicit labels exist, infer speakers from context (alternating pattern, etc.)
 - Preserve the order of messages
 - Handle various formats: chat logs, transcripts, dialogue scripts
+- CRITICAL: Keep the EXACT original text in the content field. Do NOT translate, paraphrase, summarize, or modify the text in any way. Copy it character-for-character from the input.
 
 Return a JSON array with this exact format (no other text):
 [
-  {""speaker"": ""<speaker_label>"", ""content"": ""<message_text>"", ""order"": <0-indexed_position>}
+  {""speaker"": ""<speaker_label>"", ""content"": ""<exact_original_message_text>"", ""order"": <0-indexed_position>}
 ]
 
 Example input:
@@ -86,26 +95,44 @@ Bot: Hi there!
 Example output:
 [{""speaker"": ""User"", ""content"": ""Hello"", ""order"": 0}, {""speaker"": ""Bot"", ""content"": ""Hi there!"", ""order"": 1}]";
 
-        var messages = new List<ChatMessage>
+        var chatMessages = new List<ChatMessage>
         {
             new ChatMessage(ChatRole.System, systemPrompt),
             new ChatMessage(ChatRole.User, rawInput)
         };
 
-        try
+        const int MaxRetries = 3;
+        for (int i = 0; i < MaxRetries; i++)
         {
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
-            var jsonText = SanitizeLlmJson(ExtractJson(response.Text ?? "[]"));
+            try
+            {
+                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+                var responseText = response.Text ?? "[]";
+                var jsonText = SanitizeLlmJson(ExtractJson(responseText));
 
-            var parsed = JsonSerializer.Deserialize<List<ParsedMessage>>(jsonText, LlmJsonOptions);
-            
-            return parsed ?? new List<ParsedMessage>();
+                var parsed = JsonSerializer.Deserialize<List<ParsedMessage>>(jsonText, LlmJsonOptions);
+
+                return parsed ?? new List<ParsedMessage>();
+            }
+            catch (Exception ex) when (ex is JsonException)
+            {
+                _logger.LogWarning(ex, "Failed to parse messages JSON from LLM (Attempt {Retry}/{Max}).", i + 1, MaxRetries);
+                if (i == MaxRetries - 1) throw;
+
+                // Retry with explicit instruction to return only JSON
+                chatMessages.Add(new ChatMessage(ChatRole.User,
+                    "Your response was not valid JSON. Return ONLY a JSON array, no other text. " +
+                    "Do not use literal newlines inside string values — use \\n instead. Example format:\n" +
+                    @"[{""speaker"": ""User"", ""content"": ""Hello"", ""order"": 0}]"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to parse messages from LLM.");
+                throw;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to parse messages from LLM.");
-            throw;
-        }
+
+        return new List<ParsedMessage>();
     }
 
     public async Task<List<LabeledSpeaker>> LabelIdentitiesAsync(
@@ -202,189 +229,175 @@ Choose identities that best represent the social role of each speaker in the con
         throw new Exception("Failed to obtain valid identities after retries.");
     }
 
+    /// <summary>
+    /// Per INTERACT guide: a "situation" is defined by participant identities, not topic changes.
+    /// For fixed-identity conversations, there is ONE situation with all events.
+    /// Processes each message individually with surrounding context for reliable behavior assignment.
+    /// </summary>
     public async Task<List<DetectedSituation>> DetectSituationsAsync(
-        List<ParsedMessage> messages, 
+        List<ParsedMessage> messages,
         List<LabeledSpeaker> speakers,
-        List<string> availableBehaviors, 
+        List<string> availableBehaviors,
         CancellationToken ct = default)
     {
-        // Build speaker mapping for context
-        var speakerMap = speakers.ToDictionary(s => s.OriginalLabel, s => s.Identity);
-        
-        // Validate set
         var validBehaviors = new HashSet<string>(availableBehaviors, StringComparer.OrdinalIgnoreCase);
-        
-        var behaviorListFormatted = string.Join("\n", availableBehaviors.Select(b => $"  - {b}"));
+        var behaviorListFormatted = string.Join(", ", availableBehaviors);
+        var orderedMessages = messages.OrderBy(m => m.Order).ToList();
+        var uniqueSpeakers = speakers.Select(s => s.OriginalLabel).ToList();
 
+        // Build the identity context for the prompt
+        var speakerContext = string.Join(", ", speakers.Select(s => $"{s.OriginalLabel} is a {s.Identity}"));
+
+        // System prompt — stays the same for all messages
         var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
-Your task is to analyze a conversation and:
-1. Divide it into logical situations (context shifts, topic changes)
-2. For each situation, extract ACT events (Actor performs Behavior towards Object)
+Given a message from a conversation, pick the ONE behavior from the allowed list that best describes what the speaker is doing socially.
 
-Speaker identity mapping:
-{string.Join("\n", speakers.Select(s => $"- {s.OriginalLabel} = {s.Identity}"))}
+Context: {speakerContext}
 
-ALLOWED BEHAVIORS (you MUST use one of these EXACTLY as written — no synonyms, no abbreviations, no invented terms):
-{behaviorListFormatted}
+Think about what the speaker is DOING:
+- Greeting → greet
+- Asking a question → ask_about, query
+- Giving advice/tips → advise, counsel
+- Explaining → explain_something_to
+- Agreeing → agree_with
+- Thanking → thank
+- Encouraging → encourage, comfort, reassure
+- Requesting help → request_something_from, appeal_to
+- Complaining → complain_to, criticize
+- Apologizing → apologize_to
+- Informing → inform, tell_something_to
 
-CRITICAL Rules:
-1. You MUST choose a behavior EXACTLY from the allowed list above. Copy the term character-for-character.
-2. Many behaviors are multi-word phrases (e.g. ""offer something to"", ""agree with"", ""ask about""). Use the FULL phrase, not a shortened form.
-3. Do NOT invent new behaviors or use synonyms. If unsure, pick the closest match from the list above.
+ALLOWED BEHAVIORS: [{behaviorListFormatted}]
 
-Return a JSON array with this exact format (no other text):
-[
-  {{
-    ""name"": ""Situation Name"",
-    ""description"": ""Brief description of context"",
-    ""events"": [
-      {{
-        ""actorSpeaker"": ""<original_speaker_label>"",
-        ""behavior"": ""<act_behavior_term>"",
-        ""objectSpeaker"": ""<original_speaker_label_of_recipient>"",
-        ""originalMessage"": ""<the_message_text>""
-      }}
-    ]
-  }}
-]
+Respond with ONLY the behavior term, nothing else. Example: advise";
 
-Guidelines:
-- Each message typically generates one event
-- The speaker is the Actor, the other participant is the Object
-- Choose behaviors that capture the emotional/social meaning of the message
-- Group related exchanges into the same situation";
+        var events = new List<DetectedEvent>();
 
-        var conversationText = string.Join("\n", messages.Select(m => $"{m.Speaker}: {m.Content}"));
-
-        var chatMessages = new List<ChatMessage>
+        for (int idx = 0; idx < orderedMessages.Count; idx++)
         {
-            new ChatMessage(ChatRole.System, systemPrompt),
-            new ChatMessage(ChatRole.User, $"Analyze this conversation:\n\n{conversationText}")
-        };
+            var msg = orderedMessages[idx];
+            ct.ThrowIfCancellationRequested();
 
-        const int MaxRetries = 3;
-        for (int i = 0; i < MaxRetries; i++)
-        {
-            try
+            // Build context: 1 message before, current message, 1 message after
+            var contextLines = new List<string>();
+            if (idx > 0)
+                contextLines.Add($"[Previous] {orderedMessages[idx - 1].Speaker}: {orderedMessages[idx - 1].Content}");
+            contextLines.Add($"[THIS MESSAGE] {msg.Speaker}: {msg.Content}");
+            if (idx < orderedMessages.Count - 1)
+                contextLines.Add($"[Next] {orderedMessages[idx + 1].Speaker}: {orderedMessages[idx + 1].Content}");
+
+            var userPrompt = $"What behavior best describes THIS MESSAGE?\n\n{string.Join("\n", contextLines)}";
+
+            string behavior = "acknowledge"; // fallback
+            const int MaxRetries = 2;
+
+            _logger.LogInformation("Processing message {Order}/{Total}: {Speaker}: {Preview}",
+                msg.Order + 1, orderedMessages.Count, msg.Speaker,
+                msg.Content.Length > 80 ? msg.Content.Substring(0, 80) + "..." : msg.Content);
+
+            for (int attempt = 0; attempt < MaxRetries; attempt++)
             {
-                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
-                var responseText = response.Text ?? "[]";
-                var jsonText = SanitizeLlmJson(ExtractJson(responseText));
-
-                var situations = JsonSerializer.Deserialize<List<DetectedSituation>>(jsonText, LlmJsonOptions) ?? new List<DetectedSituation>();
-                
-                // Fuzzy auto-correction: try to fix invalid behaviors before retrying
-                foreach (var sit in situations)
+                try
                 {
-                    if (sit.Events == null) continue;
-                    foreach (var evt in sit.Events)
+                    var chatMessages = new List<ChatMessage>
                     {
-                        if (!validBehaviors.Contains(evt.Behavior))
-                        {
-                            var corrected = TryFuzzyMatchBehavior(evt.Behavior, availableBehaviors);
-                            if (corrected != null)
-                            {
-                                _logger.LogInformation("Auto-corrected behavior '{Invalid}' → '{Corrected}'", evt.Behavior, corrected);
-                                evt.Behavior = corrected;
-                            }
-                        }
+                        new ChatMessage(ChatRole.System, systemPrompt),
+                        new ChatMessage(ChatRole.User, userPrompt)
+                    };
+
+                    // Per-message timeout: 60 seconds max
+                    using var msgCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    msgCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+                    var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: msgCts.Token);
+                    var responseText = (response.Text ?? "").Trim();
+
+                    // LLM should return just one behavior term — clean it up
+                    // Remove quotes, brackets, JSON wrapping if any
+                    responseText = responseText.Trim('"', '\'', '[', ']', '{', '}', ' ', '\n', '\r');
+
+                    // If the response contains a colon (like "behavior: greet"), take the part after
+                    if (responseText.Contains(':'))
+                        responseText = responseText.Split(':').Last().Trim().Trim('"', '\'');
+
+                    // If multi-word with explanation, take just the first line/word that matches
+                    if (responseText.Contains('\n'))
+                        responseText = responseText.Split('\n')[0].Trim();
+
+                    if (validBehaviors.Contains(responseText))
+                    {
+                        behavior = responseText;
+                        break;
+                    }
+
+                    // Try fuzzy match
+                    var corrected = TryFuzzyMatchBehavior(responseText, availableBehaviors);
+                    if (corrected != null)
+                    {
+                        _logger.LogInformation("Msg {Order}: corrected '{Raw}' → '{Corrected}'", msg.Order, responseText, corrected);
+                        behavior = corrected;
+                        break;
+                    }
+
+                    // Force match on last attempt
+                    if (attempt == MaxRetries - 1)
+                    {
+                        behavior = ForceMatchBehavior(responseText, availableBehaviors);
+                        _logger.LogWarning("Msg {Order}: force-matched '{Raw}' → '{Forced}'", msg.Order, responseText, behavior);
                     }
                 }
-
-                // Collect still-invalid behaviors for LLM correction
-                var stillInvalid = situations
-                    .Where(s => s.Events != null)
-                    .SelectMany(s => s.Events!)
-                    .Where(e => !validBehaviors.Contains(e.Behavior))
-                    .Select(e => e.Behavior)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                // LLM-based semantic correction for behaviors fuzzy matching couldn't fix
-                if (stillInvalid.Count > 0)
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    var llmCorrectionMap = await TryLlmCorrectBehaviorsAsync(stillInvalid, availableBehaviors, ct);
-                    foreach (var sit in situations)
-                    {
-                        if (sit.Events == null) continue;
-                        foreach (var evt in sit.Events)
-                        {
-                            if (!validBehaviors.Contains(evt.Behavior) &&
-                                llmCorrectionMap.TryGetValue(evt.Behavior.ToLowerInvariant(), out var llmCorrected) &&
-                                validBehaviors.Contains(llmCorrected))
-                            {
-                                _logger.LogInformation("LLM-corrected behavior '{Invalid}' → '{Corrected}'", evt.Behavior, llmCorrected);
-                                evt.Behavior = llmCorrected;
-                            }
-                        }
-                    }
+                    _logger.LogWarning("Msg {Order}: LLM timed out after 60s (attempt {Attempt}). Using fallback.", msg.Order, attempt + 1);
+                    break; // Don't retry on timeout — use fallback
                 }
-
-                // Validate behaviors after all corrections
-                var invalidEntries = new List<string>();
-                foreach (var sit in situations)
+                catch (Exception ex)
                 {
-                    if (sit.Events != null)
-                    {
-                        foreach (var evt in sit.Events)
-                        {
-                            if (!validBehaviors.Contains(evt.Behavior))
-                            {
-                                invalidEntries.Add($"Behavior '{evt.Behavior}' in situation '{sit.Name}' is NOT in the allowed list.");
-                            }
-                        }
-                    }
+                    _logger.LogWarning(ex, "Behavior assignment failed for message {Order} (attempt {Attempt}).", msg.Order, attempt + 1);
+                    if (attempt == MaxRetries - 1)
+                        _logger.LogError("Giving up on message {Order}, using fallback '{Behavior}'.", msg.Order, behavior);
                 }
-
-                if (invalidEntries.Count == 0)
-                {
-                    return situations;
-                }
-
-                // If this is the last retry, drop invalid events and return partial results
-                if (i == MaxRetries - 1)
-                {
-                    _logger.LogWarning("Exhausted retries. Dropping {Count} invalid events and returning partial results. Invalid: {Invalid}",
-                        invalidEntries.Count, string.Join(", ", invalidEntries));
-
-                    foreach (var sit in situations)
-                    {
-                        sit.Events = sit.Events?.Where(e => validBehaviors.Contains(e.Behavior)).ToList();
-                    }
-                    // Remove empty situations
-                    situations = situations.Where(s => s.Events != null && s.Events.Count > 0).ToList();
-                    return situations;
-                }
-
-                // Otherwise prepare for retry with the behavior list re-included
-                _logger.LogWarning("LLM returned invalid behaviors. Retrying ({RetryCount}/{MaxRetries}). Invalid: {Invalid}", i + 1, MaxRetries, string.Join(", ", invalidEntries));
-
-                chatMessages.Add(new ChatMessage(ChatRole.Assistant, responseText));
-                chatMessages.Add(new ChatMessage(ChatRole.User,
-                    $"ERROR: The following behaviors are invalid: {string.Join("; ", invalidEntries)}.\n\n" +
-                    $"Here is the complete list of allowed behaviors again. You MUST pick ONLY from this list:\n{behaviorListFormatted}\n\n" +
-                    $"Please return the corrected full JSON again."));
-
             }
-            catch (Exception ex)
+
+            // Object = the other speaker
+            var objectSpeaker = uniqueSpeakers.FirstOrDefault(s =>
+                !s.Equals(msg.Speaker, StringComparison.OrdinalIgnoreCase)) ?? uniqueSpeakers.Last();
+
+            events.Add(new DetectedEvent
             {
-                 _logger.LogError(ex, "Failed to detect situations from LLM (Attempt {Retry}).", i + 1);
-                 if (i == MaxRetries - 1) throw;
-            }
+                ActorSpeaker = msg.Speaker,
+                Behavior = behavior,
+                ObjectSpeaker = objectSpeaker,
+                OriginalMessage = msg.Content
+            });
+
+            _logger.LogInformation("Msg {Order} ({Speaker}): {Behavior}", msg.Order, msg.Speaker, behavior);
         }
 
-        // Should not be reached, but return empty as safety net
-        return new List<DetectedSituation>();
+        // Per INTERACT: one situation for fixed identities
+        var identityDesc = string.Join(" and ", speakers.Select(s => $"{s.DisplayName} ({s.Identity})"));
+        var situation = new DetectedSituation
+        {
+            Name = "Interaction",
+            Description = $"Conversation between {identityDesc}",
+            Events = events
+        };
+
+        _logger.LogInformation("Built interaction with {EventCount} events from {MsgCount} messages.",
+            events.Count, messages.Count);
+
+        return new List<DetectedSituation> { situation };
     }
 
     /// <summary>
     /// Extract JSON from a response that might contain markdown code blocks or extra text.
+    /// Uses bracket matching to find the correct closing bracket, handling cases where
+    /// the LLM outputs multiple arrays or trailing content.
     /// </summary>
     private string ExtractJson(string text)
     {
-        // Try to find JSON array in the text
         var trimmed = text.Trim();
-        
+
         // Handle markdown code blocks
         if (trimmed.Contains("```json"))
         {
@@ -404,17 +417,128 @@ Guidelines:
                 trimmed = trimmed.Substring(start, end - start).Trim();
             }
         }
-        
-        // Find the JSON array
+
+        // Find the first '[' and its matching ']' using bracket counting
         var jsonStart = trimmed.IndexOf('[');
-        var jsonEnd = trimmed.LastIndexOf(']');
-        
-        if (jsonStart >= 0 && jsonEnd > jsonStart)
+        if (jsonStart < 0)
+        {
+            _logger.LogWarning("ExtractJson: No JSON array found in LLM response. First 100 chars: {Preview}",
+                trimmed.Length > 100 ? trimmed.Substring(0, 100) + "..." : trimmed);
+            return "[]";
+        }
+
+        int depth = 0;
+        bool inString = false;
+        int jsonEnd = -1;
+        for (int i = jsonStart; i < trimmed.Length; i++)
+        {
+            char c = trimmed[i];
+            if (c == '"' && (i == 0 || trimmed[i - 1] != '\\'))
+            {
+                inString = !inString;
+            }
+            else if (!inString)
+            {
+                if (c == '[') depth++;
+                else if (c == ']')
+                {
+                    depth--;
+                    if (depth == 0) { jsonEnd = i; break; }
+                }
+            }
+        }
+
+        if (jsonEnd > jsonStart)
         {
             return trimmed.Substring(jsonStart, jsonEnd - jsonStart + 1);
         }
-        
-        return trimmed;
+
+        // Fallback: use LastIndexOf if bracket matching failed (unbalanced quotes etc.)
+        jsonEnd = trimmed.LastIndexOf(']');
+        if (jsonEnd > jsonStart)
+        {
+            return trimmed.Substring(jsonStart, jsonEnd - jsonStart + 1);
+        }
+
+        _logger.LogWarning("ExtractJson: No valid JSON array found in LLM response. First 100 chars: {Preview}",
+            trimmed.Length > 100 ? trimmed.Substring(0, 100) + "..." : trimmed);
+        return "[]";
+    }
+
+    /// <summary>
+    /// Try to parse structured chat formats deterministically without LLM.
+    /// Handles formats like "Speaker: message" with clear labels at line starts.
+    /// Returns null if the format is not clearly structured.
+    /// </summary>
+    // Common words that appear with colons in text but are NOT speaker labels.
+    // German + English words that frequently start lines in structured content.
+    private static readonly HashSet<string> _denyListSpeakers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // German
+        "Pause", "Beispiel", "Beispiele", "Hinweis", "Tipp", "Tipps", "Antwort", "Frage",
+        "Ergebnis", "Zusammenfassung", "Übung", "Aufgabe", "Schritt", "Ziel", "Methode",
+        "Vorteil", "Nachteil", "Wichtig", "Achtung", "Alternative", "Vorschlag",
+        "Hier einige Tipps", "Hier einige", "Zum Beispiel", "Das heißt",
+        // English
+        "Example", "Note", "Tip", "Tips", "Answer", "Question", "Result", "Summary",
+        "Exercise", "Task", "Step", "Goal", "Method", "Important", "Warning",
+        "Hint", "Option", "Source", "Reference", "Output", "Input", "Response",
+        // Numbered/structural
+        "Lernblock", "Block", "Phase", "Teil", "Abschnitt", "Punkt",
+    };
+
+    private List<ParsedMessage>? TryDeterministicParse(string rawInput)
+    {
+        // Match lines that start with a short speaker label (max 20 chars) followed by a colon
+        // e.g., "User: hello", "Bot: hi there", "A: message", "Person 1: text"
+        var speakerPattern = new Regex(@"^([A-Za-zÀ-ÿ0-9_ ]{1,20}):\s", RegexOptions.Multiline);
+        var matches = speakerPattern.Matches(rawInput);
+
+        if (matches.Count < 2) return null;
+
+        // Count how often each label appears — real speakers appear multiple times.
+        // Filter out known non-speaker words from the deny list.
+        var labelCounts = matches
+            .Select(m => m.Groups[1].Value.Trim())
+            .Where(label => !_denyListSpeakers.Contains(label))
+            .GroupBy(l => l, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+        // Real speaker labels: appear at least twice AND are max 2 words.
+        // This filters out content lines like "Hier einige Tipps:" or "Beispiele für relevante Studien:"
+        // Real chat labels: "User", "Bot", "Person 1", "Speaker A", etc.
+        var validSpeakers = new HashSet<string>(
+            labelCounts
+                .Where(kvp => kvp.Value >= 2 && kvp.Key.Split(' ').Length <= 2)
+                .Select(kvp => kvp.Key),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (validSpeakers.Count < 2) return null;
+
+        // Filter matches to only valid (recurring, short) speakers
+        var validMatches = matches.Where(m => validSpeakers.Contains(m.Groups[1].Value.Trim())).ToList();
+
+        // Build messages by splitting at valid speaker labels
+        var result = new List<ParsedMessage>();
+        for (int i = 0; i < validMatches.Count; i++)
+        {
+            var speaker = validMatches[i].Groups[1].Value.Trim();
+            var contentStart = validMatches[i].Index + validMatches[i].Length;
+            var contentEnd = (i + 1 < validMatches.Count) ? validMatches[i + 1].Index : rawInput.Length;
+            var content = rawInput.Substring(contentStart, contentEnd - contentStart).Trim();
+
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                result.Add(new ParsedMessage
+                {
+                    Speaker = speaker,
+                    Content = content,
+                    Order = result.Count
+                });
+            }
+        }
+
+        return result.Count >= 2 ? result : null;
     }
 
     /// <summary>
@@ -451,12 +575,14 @@ Guidelines:
         if (containsMatches.Count == 1) return containsMatches[0];
         if (containsMatches.Count > 1) return containsMatches.OrderBy(b => b.Length).First();
 
-        // 4. Levenshtein distance fallback (threshold ≤ 3 edits, only for terms ≥ 4 chars)
-        if (lower.Length >= 4)
+        // 4. Levenshtein distance fallback (proportional threshold, only for terms ≥ 5 chars)
+        if (lower.Length >= 5)
         {
+            // Allow ~20% edit distance, minimum 2, maximum 3
+            int maxDistance = Math.Clamp(lower.Length / 5, 2, 3);
             var closest = validBehaviors
                 .Select(b => (behavior: b, distance: LevenshteinDistance(lower, b.ToLowerInvariant())))
-                .Where(x => x.distance <= 3)
+                .Where(x => x.distance <= maxDistance)
                 .OrderBy(x => x.distance)
                 .ThenBy(x => x.behavior.Length)
                 .FirstOrDefault();
@@ -464,6 +590,26 @@ Guidelines:
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Force-match an invalid behavior to the closest valid one using Levenshtein distance
+    /// with no threshold. This is the last resort — every event gets a behavior.
+    /// </summary>
+    private string ForceMatchBehavior(string invalidBehavior, List<string> validBehaviors)
+    {
+        // First try the normal fuzzy match (which has thresholds)
+        var fuzzy = TryFuzzyMatchBehavior(invalidBehavior, validBehaviors);
+        if (fuzzy != null) return fuzzy;
+
+        // Force: pick the closest behavior by Levenshtein distance, no threshold
+        var lower = invalidBehavior.Trim().ToLowerInvariant();
+        var closest = validBehaviors
+            .Select(b => (behavior: b, distance: LevenshteinDistance(lower, b.ToLowerInvariant())))
+            .OrderBy(x => x.distance)
+            .ThenBy(x => x.behavior.Length)
+            .First();
+        return closest.behavior;
     }
 
     /// <summary>
@@ -524,12 +670,64 @@ Return ONLY a JSON object mapping each invalid behavior to a valid one. Example:
     }
 
     /// <summary>
-    /// Sanitize common LLM JSON quirks (trailing commas, etc.) before deserialization.
+    /// Sanitize common LLM JSON quirks before deserialization.
+    /// Handles: unescaped control chars in strings, missing commas between objects/arrays.
+    /// Trailing commas are handled by <see cref="LlmJsonOptions"/> (AllowTrailingCommas).
     /// </summary>
     private static string SanitizeLlmJson(string json)
     {
-        // Remove trailing commas before ] or }
-        return Regex.Replace(json, @",\s*([}\]])", "$1");
+        // 1. Escape literal control characters (newline, tab, etc.) inside JSON string values.
+        //    Ollama/local models often output raw newlines inside strings instead of \n.
+        json = EscapeControlCharsInStrings(json);
+
+        // 2. Remove ellipsis and trailing dots that LLMs add as comments inside JSON
+        //    e.g. "events": [ ... ] or stray "..." between properties
+        json = Regex.Replace(json, @",\s*\.\.\.+\s*([}\]])", "$1");  // , ... } or , ... ]
+        json = Regex.Replace(json, @"\.\.\.+", "");                   // remaining ... anywhere
+
+        // 3. Insert missing commas between adjacent objects/arrays: }{ → },{ etc.
+        json = Regex.Replace(json, @"}\s*{", "},{");
+        json = Regex.Replace(json, @"}\s*\[", "},[");
+        json = Regex.Replace(json, @"]\s*{", "],{");
+        // Insert missing comma after a closing quote followed by a new key: "value"  "key" → "value", "key"
+        json = Regex.Replace(json, @"""\s+""(?=[^:]*"":)", @""", """);
+        return json;
+    }
+
+    /// <summary>
+    /// Escape raw control characters (newline, carriage return, tab) that appear
+    /// inside JSON string values. Uses a simple state machine to track string boundaries.
+    /// </summary>
+    private static string EscapeControlCharsInStrings(string json)
+    {
+        var sb = new StringBuilder(json.Length);
+        bool inString = false;
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (c == '"' && (i == 0 || json[i - 1] != '\\'))
+            {
+                inString = !inString;
+                sb.Append(c);
+            }
+            else if (inString && c == '\n')
+            {
+                sb.Append("\\n");
+            }
+            else if (inString && c == '\r')
+            {
+                // skip \r (will be covered by \n in \r\n sequences)
+            }
+            else if (inString && c == '\t')
+            {
+                sb.Append("\\t");
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
     }
 
     /// <summary>

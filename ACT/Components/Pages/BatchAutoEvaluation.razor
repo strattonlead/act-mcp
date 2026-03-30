@@ -39,7 +39,7 @@
                     </MudSelect>
                 }
 
-                <MudFileUpload T="IReadOnlyList<IBrowserFile>" FilesChanged="UploadFiles" MaximumFileCount="100">
+                <MudFileUpload T="IReadOnlyList<IBrowserFile>" FilesChanged="UploadFiles" MaximumFileCount="1000">
                     <ActivatorContent>
                         <MudButton Variant="Variant.Filled" 
                                    Color="Color.Primary" 
@@ -159,8 +159,9 @@
 @code {
     private List<ActDictionaryDto> _dictionaries = new();
     private string _dictionaryKey = "";
-    private bool _forceIdentities = false;
+    private bool _forceIdentities = true;
     private IEnumerable<string> _selectedForcedIdentities = new HashSet<string>();
+    private static readonly HashSet<string> DefaultIdentities = new(StringComparer.OrdinalIgnoreCase) { "assistant", "student" };
     private List<string> _availableIdentities = new();
     private List<BatchFileStatus> _files => BatchService.GetFiles();
     private BatchFileStatus? _selectedFile;
@@ -198,7 +199,10 @@
     {
         _dictionaryKey = newDict;
         _availableIdentities = await ActService.GetDictionaryIdentitiesAsync(_dictionaryKey);
-        _selectedForcedIdentities = new HashSet<string>(); // Clear previous selection
+        // Pre-select default identities if they exist in this dictionary
+        _selectedForcedIdentities = new HashSet<string>(
+            DefaultIdentities.Where(id => _availableIdentities.Contains(id, StringComparer.OrdinalIgnoreCase))
+                .Select(id => _availableIdentities.First(a => a.Equals(id, StringComparison.OrdinalIgnoreCase))));
         StateHasChanged();
     }
 
@@ -244,6 +248,7 @@
         {
             BatchFileState.Completed => Color.Success,
             BatchFileState.Failed => Color.Error,
+            BatchFileState.Skipped => Color.Warning,
             BatchFileState.Pending => Color.Default,
             _ => Color.Info
         };
@@ -255,6 +260,7 @@
         {
             BatchFileState.Completed => Severity.Success,
             BatchFileState.Failed => Severity.Error,
+            BatchFileState.Skipped => Severity.Warning,
             BatchFileState.Pending => Severity.Normal,
             _ => Severity.Info
         };

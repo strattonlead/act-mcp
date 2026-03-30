@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
+using System.Net.Http;
 using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using MudBlazor.Services;
@@ -80,11 +81,17 @@ if (!string.IsNullOrEmpty(openaiApiKey))
 {
     chatClient = new ChatClient(chatModel ?? "gpt-4o", openaiApiKey).AsIChatClient();
     builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
+    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = false });
 }
 else if (!string.IsNullOrWhiteSpace(ollamaEndpoint) && Uri.IsWellFormedUriString(ollamaEndpoint, UriKind.Absolute))
 {
-    chatClient = new OllamaSharp.OllamaApiClient(ollamaEndpoint, chatModel);
+    var ollamaClient = new OllamaSharp.OllamaApiClient(
+        new HttpClient { BaseAddress = new Uri(ollamaEndpoint), Timeout = TimeSpan.FromMinutes(30) },
+        chatModel);
+    chatClient = ollamaClient;
     builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
+    // Flag for services to use sequential processing with local models
+    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = true });
 }
 else
 {

@@ -10,7 +10,8 @@ public enum BatchFileState
     CreatingConversation,
     Analyzing,
     Completed,
-    Failed
+    Failed,
+    Skipped
 }
 
 public class BatchFileStatus
