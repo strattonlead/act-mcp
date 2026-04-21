@@ -63,6 +63,103 @@ public class ChatAgent : IChatAgent
         }
     }
 
+    public async Task<string> ExtractSingleBehaviorAsync(
+        string text,
+        List<string> availableBehaviors,
+        string actorIdentity = "student",
+        string objectIdentity = "assistant",
+        CancellationToken ct = default)
+    {
+        if (availableBehaviors == null || availableBehaviors.Count == 0)
+            throw new ArgumentException("availableBehaviors must not be empty", nameof(availableBehaviors));
+
+        var validBehaviors = new HashSet<string>(availableBehaviors, StringComparer.OrdinalIgnoreCase);
+        var behaviorListFormatted = string.Join(", ", availableBehaviors);
+
+        var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
+The {actorIdentity} is speaking to the {objectIdentity}. Pick the ONE behavior from the allowed list that best describes what the {actorIdentity} is doing socially in this message.
+
+Think about what the speaker is DOING:
+- Greeting → greet
+- Asking a question → ask_about, query
+- Giving advice/tips → advise, counsel
+- Explaining → explain_something_to
+- Agreeing → agree_with
+- Thanking → thank
+- Encouraging → encourage, comfort, reassure
+- Requesting help → request_something_from, appeal_to
+- Complaining → complain_to, criticize
+- Apologizing → apologize_to
+- Informing → inform, tell_something_to
+
+ALLOWED BEHAVIORS: [{behaviorListFormatted}]
+
+Respond with ONLY the behavior term, nothing else. Example: advise";
+
+        const int maxRetries = 2;
+        string behavior = availableBehaviors.Contains("acknowledge", StringComparer.OrdinalIgnoreCase)
+            ? availableBehaviors.First(b => b.Equals("acknowledge", StringComparison.OrdinalIgnoreCase))
+            : availableBehaviors[0];
+
+        for (int attempt = 0; attempt < maxRetries; attempt++)
+        {
+            try
+            {
+                var chatMessages = new List<ChatMessage>
+                {
+                    new ChatMessage(ChatRole.System, systemPrompt),
+                    new ChatMessage(ChatRole.User, $"What behavior best describes THIS MESSAGE?\n\n[THIS MESSAGE] {actorIdentity}: {text}")
+                };
+
+                using var msgCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                msgCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: msgCts.Token);
+                var responseText = (response.Text ?? "").Trim();
+
+                // Clean common LLM wrappers (quotes, brackets, JSON-ish fragments)
+                responseText = responseText.Trim('"', '\'', '[', ']', '{', '}', ' ', '\n', '\r');
+                if (responseText.Contains(':'))
+                    responseText = responseText.Split(':').Last().Trim().Trim('"', '\'');
+                if (responseText.Contains('\n'))
+                    responseText = responseText.Split('\n')[0].Trim();
+
+                if (validBehaviors.Contains(responseText))
+                {
+                    behavior = responseText;
+                    break;
+                }
+
+                var corrected = TryFuzzyMatchBehavior(responseText, availableBehaviors);
+                if (corrected != null)
+                {
+                    _logger.LogInformation("ExtractSingleBehavior: corrected '{Raw}' -> '{Corrected}'", responseText, corrected);
+                    behavior = corrected;
+                    break;
+                }
+
+                if (attempt == maxRetries - 1)
+                {
+                    behavior = ForceMatchBehavior(responseText, availableBehaviors);
+                    _logger.LogWarning("ExtractSingleBehavior: force-matched '{Raw}' -> '{Forced}'", responseText, behavior);
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("ExtractSingleBehavior: LLM timed out after 60s (attempt {Attempt}). Using fallback '{Behavior}'.", attempt + 1, behavior);
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ExtractSingleBehavior: LLM call failed (attempt {Attempt}).", attempt + 1);
+                if (attempt == maxRetries - 1)
+                    _logger.LogError("ExtractSingleBehavior: giving up, using fallback '{Behavior}'.", behavior);
+            }
+        }
+
+        return behavior;
+    }
+
     public async Task<List<ParsedMessage>> ParseMessagesAsync(string rawInput, CancellationToken ct = default)
     {
         // Try deterministic parsing first for structured chat formats (Speaker: message)
