@@ -84,7 +84,13 @@ public class AnnotateService : IAnnotateService
             Epa = EpaDto.From(interaction.Result.TransientActorEPA),
             Deflection = interaction.Result.Deflection,
             SituationContext = PhaseToSituationContext(phase),
-            PreferredResponseEPA = EpaDto.From(preferredEpa)
+            PreferredResponseEPA = EpaDto.From(preferredEpa),
+            Event = new ActEventDto
+            {
+                Actor = ActorIdentity,
+                Behavior = behavior,
+                Object = ObjectIdentity
+            }
         };
     }
 
@@ -148,6 +154,21 @@ public class AnnotateResponseDto
 
     [JsonPropertyName("preferredResponseEPA")]
     public EpaDto PreferredResponseEPA { get; set; } = new();
+
+    [JsonPropertyName("event")]
+    public ActEventDto Event { get; set; } = new();
+}
+
+public class ActEventDto
+{
+    [JsonPropertyName("actor")]
+    public string Actor { get; set; } = string.Empty;
+
+    [JsonPropertyName("behavior")]
+    public string Behavior { get; set; } = string.Empty;
+
+    [JsonPropertyName("object")]
+    public string Object { get; set; } = string.Empty;
 }
 
 public class EpaDto
