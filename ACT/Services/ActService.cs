@@ -15,6 +15,7 @@ public interface IActService
     Task<List<string>> GetDictionaryIdentitiesAsync(string key, CancellationToken ct = default);
     Task<List<string>> GetDictionaryBehaviorsAsync(string key, CancellationToken ct = default);
     Task<List<ActSuggestionDto>> SuggestActionsAsync(string actor, string objectIdentity, string dictionaryKey = "germany2007", string gender = "male", CancellationToken ct = default);
+    Task<double[]> GetIdentityEpaAsync(string identity, string dictionaryKey = "germany2007", string gender = "average", CancellationToken ct = default);
 }
 
 public class ActService : IActService
@@ -83,6 +84,31 @@ public class ActService : IActService
             }
         });
     }
+    public async Task<double[]> GetIdentityEpaAsync(string identity, string dictionaryKey = "germany2007", string gender = "average", CancellationToken ct = default)
+    {
+        var cacheKey = $"{dictionaryKey}:{identity}:{gender}";
+        return await _cache.GetIdentityEpaAsync(cacheKey, async () =>
+        {
+            try
+            {
+                var scriptPath = "Scripts/get_identity_epa.R";
+                var args = new[] { dictionaryKey, identity, gender };
+                var result = await _rRunner.RunJsonAsync<IdentityEpaDto>(scriptPath, args, ct: ct);
+                if (result.Payload != null && result.Payload.Error == null)
+                {
+                    return new[] { result.Payload.E, result.Payload.P, result.Payload.A };
+                }
+                _logger.LogWarning("get_identity_epa.R returned error for {Identity}/{Dict}: {Error}", identity, dictionaryKey, result.Payload?.Error);
+                return new double[] { 0, 0, 0 };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load identity EPA for {Identity} in dictionary {Key}", identity, dictionaryKey);
+                return new double[] { 0, 0, 0 };
+            }
+        });
+    }
+
     public async Task<List<ActSuggestionDto>> SuggestActionsAsync(string actor, string objectIdentity, string dictionaryKey = "germany2007", string gender = "male", CancellationToken ct = default)
     {
         return await _cache.GetSuggestionsAsync($"{dictionaryKey}:{actor}:{objectIdentity}:{gender}", async () =>
@@ -173,4 +199,19 @@ public class ActSuggestionDto
 
     [JsonPropertyName("epa")]
     public List<double> Epa { get; set; }
+}
+
+public class IdentityEpaDto
+{
+    [JsonPropertyName("e")]
+    public double E { get; set; }
+
+    [JsonPropertyName("p")]
+    public double P { get; set; }
+
+    [JsonPropertyName("a")]
+    public double A { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
 }

@@ -60,6 +60,7 @@ builder.Services.AddScoped<IFileRepository, MongoFileRepository>();
 builder.Services.AddScoped<IConversationService, ConversationService>();
 builder.Services.AddScoped<IChatAgent, ChatAgent>();
 builder.Services.AddActTool(); // Explicitly register ActTool for Controller usage
+builder.Services.AddScoped<IAnnotateService, AnnotateService>();
 builder.Services.AddSingleton<IActToolMonitor, ActToolMonitor>();
 builder.Services.AddSingleton<IActDataCache, ActDataCache>();
 builder.Services.AddS3Service(logger);

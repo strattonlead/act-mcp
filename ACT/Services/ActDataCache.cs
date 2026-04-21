@@ -11,6 +11,7 @@ public interface IActDataCache
     Task<List<string>> GetIdentitiesAsync(string key, System.Func<Task<List<string>>> factory);
     Task<List<string>> GetBehaviorsAsync(string key, System.Func<Task<List<string>>> factory);
     Task<List<ActSuggestionDto>> GetSuggestionsAsync(string key, System.Func<Task<List<ActSuggestionDto>>> factory);
+    Task<double[]> GetIdentityEpaAsync(string key, System.Func<Task<double[]>> factory);
 }
 
 public class ActDataCache : IActDataCache
@@ -30,6 +31,10 @@ public class ActDataCache : IActDataCache
     // Cache for suggestions
     private readonly ConcurrentDictionary<string, List<ActSuggestionDto>> _suggestions = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _suggestionLocks = new();
+
+    // Cache for identity EPAs, keyed as "<dictKey>:<identity>:<gender>"
+    private readonly ConcurrentDictionary<string, double[]> _identityEpas = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _identityEpaLocks = new();
 
     public async Task<List<ActDictionaryDto>> GetDictionariesAsync(System.Func<Task<List<ActDictionaryDto>>> factory)
     {
@@ -110,6 +115,33 @@ public class ActDataCache : IActDataCache
             keyLock.Release();
         }
     }
+    public async Task<double[]> GetIdentityEpaAsync(string key, System.Func<Task<double[]>> factory)
+    {
+        if (_identityEpas.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        var keyLock = _identityEpaLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+
+        await keyLock.WaitAsync();
+        try
+        {
+            if (_identityEpas.TryGetValue(key, out cached))
+            {
+                return cached;
+            }
+
+            var result = await factory();
+            _identityEpas[key] = result;
+            return result;
+        }
+        finally
+        {
+            keyLock.Release();
+        }
+    }
+
     public async Task<List<ActSuggestionDto>> GetSuggestionsAsync(string key, System.Func<Task<List<ActSuggestionDto>>> factory)
     {
         if (_suggestions.TryGetValue(key, out var cached))

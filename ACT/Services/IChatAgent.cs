@@ -29,8 +29,20 @@ public interface IChatAgent
     /// Detect situations and extract events from the conversation.
     /// </summary>
     Task<List<DetectedSituation>> DetectSituationsAsync(
-        List<ParsedMessage> messages, 
+        List<ParsedMessage> messages,
         List<LabeledSpeaker> speakers,
-        List<string> availableBehaviors, 
+        List<string> availableBehaviors,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Pick a single ACT behavior term from <paramref name="availableBehaviors"/> that best
+    /// describes the social act performed in <paramref name="text"/>. Falls back to fuzzy /
+    /// force match if the LLM returns something outside the allowed list.
+    /// </summary>
+    Task<string> ExtractSingleBehaviorAsync(
+        string text,
+        List<string> availableBehaviors,
+        string actorIdentity = "student",
+        string objectIdentity = "assistant",
         CancellationToken ct = default);
 }
