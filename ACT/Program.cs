@@ -77,12 +77,22 @@ var openaiApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 var chatModel = Environment.GetEnvironmentVariable("CHAT_MODEL");
 var ollamaEndpoint = Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT");
 
+// Optional experiment controls for the robustness sweep (paper Section 5):
+// CHAT_TEMPERATURE overrides decoding temperature; PROMPT_VARIANT selects the behavior prompt (P0/P1).
+// Parsed with InvariantCulture so "0.8" works regardless of OS locale.
+float? chatTemperature = float.TryParse(
+    Environment.GetEnvironmentVariable("CHAT_TEMPERATURE"),
+    System.Globalization.NumberStyles.Float,
+    System.Globalization.CultureInfo.InvariantCulture,
+    out var parsedTemperature) ? parsedTemperature : (float?)null;
+var promptVariant = Environment.GetEnvironmentVariable("PROMPT_VARIANT") ?? "P0";
+
 IChatClient chatClient;
 if (!string.IsNullOrEmpty(openaiApiKey))
 {
     chatClient = new ChatClient(chatModel ?? "gpt-4o", openaiApiKey).AsIChatClient();
     builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
-    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = false });
+    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = false, Temperature = chatTemperature, PromptVariant = promptVariant });
 }
 else if (!string.IsNullOrWhiteSpace(ollamaEndpoint) && Uri.IsWellFormedUriString(ollamaEndpoint, UriKind.Absolute))
 {
@@ -92,7 +102,7 @@ else if (!string.IsNullOrWhiteSpace(ollamaEndpoint) && Uri.IsWellFormedUriString
     chatClient = ollamaClient;
     builder.Services.AddSingleton(sp => new ChatClientBuilder(chatClient).UseFunctionInvocation().Build());
     // Flag for services to use sequential processing with local models
-    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = true });
+    builder.Services.AddSingleton(new ACT.Services.LlmProviderConfig { IsLocalModel = true, Temperature = chatTemperature, PromptVariant = promptVariant });
 }
 else
 {

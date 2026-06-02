@@ -17,6 +17,8 @@ public class ChatAgent : IChatAgent
 {
     private readonly IChatClient _chatClient;
     private readonly ILogger<ChatAgent> _logger;
+    private readonly ChatOptions? _chatOptions;
+    private readonly string _promptVariant;
 
     /// <summary>Shared JSON options tolerant of common LLM quirks.</summary>
     private static readonly JsonSerializerOptions LlmJsonOptions = new()
@@ -26,10 +28,17 @@ public class ChatAgent : IChatAgent
         ReadCommentHandling = JsonCommentHandling.Skip
     };
 
-    public ChatAgent(IChatClient chatClient, ILogger<ChatAgent> logger)
+    public ChatAgent(IChatClient chatClient, ILogger<ChatAgent> logger, LlmProviderConfig? config = null)
     {
         _chatClient = chatClient;
         _logger = logger;
+        // Apply a non-default decoding temperature only when one is configured (CHAT_TEMPERATURE);
+        // otherwise leave options null so the provider defaults apply (Ollama: temperature 0.8, top-p 0.9).
+        _chatOptions = config?.Temperature is float temperature
+            ? new ChatOptions { Temperature = temperature }
+            : null;
+        // Behavior-selection prompt variant (PROMPT_VARIANT): "P0" (default study prompt) or "P1".
+        _promptVariant = config?.PromptVariant is { Length: > 0 } pv ? pv : "P0";
     }
 
     public async Task<string> ExtractActEventsAsync(string conversationHistory, List<string>? availableBehaviors = null, CancellationToken ct = default)
@@ -53,7 +62,7 @@ public class ChatAgent : IChatAgent
 
         try
         {
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            var response = await _chatClient.GetResponseAsync(messages, _chatOptions, cancellationToken: ct);
             return response.Text ?? string.Empty;
         }
         catch (Exception ex)
@@ -203,7 +212,7 @@ Example output:
         {
             try
             {
-                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+                var response = await _chatClient.GetResponseAsync(chatMessages, _chatOptions, cancellationToken: ct);
                 var responseText = response.Text ?? "[]";
                 var jsonText = SanitizeLlmJson(ExtractJson(responseText));
 
@@ -286,7 +295,7 @@ Choose identities that best represent the social role of each speaker in the con
         {
             try
             {
-                var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
+                var response = await _chatClient.GetResponseAsync(chatMessages, _chatOptions, cancellationToken: ct);
                 var responseText = response.Text ?? "[]";
                 var jsonText = SanitizeLlmJson(ExtractJson(responseText));
 
@@ -345,28 +354,9 @@ Choose identities that best represent the social role of each speaker in the con
         // Build the identity context for the prompt
         var speakerContext = string.Join(", ", speakers.Select(s => $"{s.OriginalLabel} is a {s.Identity}"));
 
-        // System prompt — stays the same for all messages
-        var systemPrompt = $@"You are an expert in Affect Control Theory (ACT).
-Given a message from a conversation, pick the ONE behavior from the allowed list that best describes what the speaker is doing socially.
-
-Context: {speakerContext}
-
-Think about what the speaker is DOING:
-- Greeting → greet
-- Asking a question → ask_about, query
-- Giving advice/tips → advise, counsel
-- Explaining → explain_something_to
-- Agreeing → agree_with
-- Thanking → thank
-- Encouraging → encourage, comfort, reassure
-- Requesting help → request_something_from, appeal_to
-- Complaining → complain_to, criticize
-- Apologizing → apologize_to
-- Informing → inform, tell_something_to
-
-ALLOWED BEHAVIORS: [{behaviorListFormatted}]
-
-Respond with ONLY the behavior term, nothing else. Example: advise";
+        // System prompt — stays the same for all messages. Variant selected by configuration
+        // (PROMPT_VARIANT env): P0 = original zero-shot heuristic; P1 = few-shot specificity rubric.
+        var systemPrompt = BuildBehaviorSystemPrompt(_promptVariant, speakerContext, behaviorListFormatted);
 
         var events = new List<DetectedEvent>();
 
@@ -406,7 +396,7 @@ Respond with ONLY the behavior term, nothing else. Example: advise";
                     using var msgCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     msgCts.CancelAfter(TimeSpan.FromSeconds(60));
 
-                    var response = await _chatClient.GetResponseAsync(chatMessages, cancellationToken: msgCts.Token);
+                    var response = await _chatClient.GetResponseAsync(chatMessages, _chatOptions, cancellationToken: msgCts.Token);
                     var responseText = (response.Text ?? "").Trim();
 
                     // LLM should return just one behavior term — clean it up
@@ -484,6 +474,65 @@ Respond with ONLY the behavior term, nothing else. Example: advise";
             events.Count, messages.Count);
 
         return new List<DetectedSituation> { situation };
+    }
+
+    /// <summary>
+    /// Build the behavior-selection system prompt for the configured prompt variant.
+    /// P0 (default) is the original zero-shot heuristic prompt used in the main study.
+    /// P1 is an alternative used for the robustness analysis (see paper Section 5,
+    /// "Generalization and Robustness"): it adds worked few-shot examples and an explicit
+    /// instruction to prefer the most specific applicable term, probing whether prompt
+    /// design shifts behavior specificity and hence deflection. Both variants keep the
+    /// same single-term output contract so downstream parsing is identical.
+    /// </summary>
+    private static string BuildBehaviorSystemPrompt(string variant, string speakerContext, string behaviorListFormatted)
+    {
+        if (string.Equals(variant, "P1", StringComparison.OrdinalIgnoreCase))
+        {
+            return $@"You are an expert in Affect Control Theory (ACT).
+Given a message from a conversation, pick the ONE behavior from the allowed list that best describes what the speaker is doing socially.
+
+Context: {speakerContext}
+
+Decision procedure:
+1. Identify the speaker's communicative act in THIS MESSAGE (what social action are they performing?).
+2. Among the allowed behaviors that fit, choose the MOST SPECIFIC one rather than a generic catch-all (e.g., prefer 'advise' or 'explain_something_to' over 'tell_something_to'; prefer 'reassure' over 'talk_to').
+3. Only fall back to a generic term when no specific term applies.
+
+Worked examples:
+- ""I completely understand how stressful exams feel; you are not alone."" → reassure
+- ""Have you tried breaking your revision into 25-minute blocks?"" → advise
+- ""The exam will cover chapters three through five."" → inform
+- ""Thank you so much, that really helps."" → thank
+- ""Could you help me build a study plan?"" → request_something_from
+
+ALLOWED BEHAVIORS: [{behaviorListFormatted}]
+
+Respond with ONLY the behavior term, nothing else. Example: advise";
+        }
+
+        // P0 — original prompt, unchanged from the main study (do not edit: preserves base reproducibility).
+        return $@"You are an expert in Affect Control Theory (ACT).
+Given a message from a conversation, pick the ONE behavior from the allowed list that best describes what the speaker is doing socially.
+
+Context: {speakerContext}
+
+Think about what the speaker is DOING:
+- Greeting → greet
+- Asking a question → ask_about, query
+- Giving advice/tips → advise, counsel
+- Explaining → explain_something_to
+- Agreeing → agree_with
+- Thanking → thank
+- Encouraging → encourage, comfort, reassure
+- Requesting help → request_something_from, appeal_to
+- Complaining → complain_to, criticize
+- Apologizing → apologize_to
+- Informing → inform, tell_something_to
+
+ALLOWED BEHAVIORS: [{behaviorListFormatted}]
+
+Respond with ONLY the behavior term, nothing else. Example: advise";
     }
 
     /// <summary>
@@ -739,7 +788,7 @@ Return ONLY a JSON object mapping each invalid behavior to a valid one. Example:
                 new ChatMessage(ChatRole.User, prompt)
             };
 
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: ct);
+            var response = await _chatClient.GetResponseAsync(messages, _chatOptions, cancellationToken: ct);
             var jsonText = SanitizeLlmJson(response.Text ?? "{}");
 
             // Extract JSON object

@@ -10,4 +10,17 @@ public class LlmProviderConfig
     /// True when using a local model (Ollama). Enables sequential processing.
     /// </summary>
     public bool IsLocalModel { get; set; }
+
+    /// <summary>
+    /// Optional decoding temperature override. When null, the provider default applies
+    /// (Ollama default is 0.8). Set via the CHAT_TEMPERATURE environment variable; used for
+    /// the robustness temperature sweep.
+    /// </summary>
+    public float? Temperature { get; set; }
+
+    /// <summary>
+    /// Behavior-selection prompt variant: "P0" (default, original study prompt) or "P1"
+    /// (alternative used for the robustness analysis). Set via the PROMPT_VARIANT env var.
+    /// </summary>
+    public string PromptVariant { get; set; } = "P0";
 }
